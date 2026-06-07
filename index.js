@@ -4,6 +4,7 @@ process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
+const path = require('path');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const http = require('http');
@@ -16,6 +17,10 @@ const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 const MEU_NUMERO = (process.env.Meu_numero || '').replace(/[^0-9]/g, '');
 const PORT = process.env.PORT || 3000;
+const RENDER_API_KEY = process.env.RENDER_API_KEY || '';
+const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
+
+const AUTH_DIR = 'auth_info';
 
 const PRECOS = { trufa: 5.0, bombom: 5.0, bolo: 12.0 };
 const SINONIMOS = {
@@ -26,6 +31,53 @@ const SINONIMOS = {
 let pairingCode = null;
 let botConectado = false;
 let qrCodeData = null;
+
+// Restaura creds.json a partir da variavel de ambiente CREDS_JSON
+function restaurarSessao() {
+  try {
+    const credsJson = process.env.CREDS_JSON;
+    if (!credsJson) return false;
+    if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+    fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
+    console.log('Sessao restaurada do CREDS_JSON');
+    return true;
+  } catch (e) {
+    console.error('Erro ao restaurar sessao:', e.message);
+    return false;
+  }
+}
+
+// Salva creds.json na variavel CREDS_JSON via API do Render
+async function salvarSessaoNoRender() {
+  try {
+    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    if (!fs.existsSync(credsPath)) return;
+    const conteudo = fs.readFileSync(credsPath, 'utf8');
+
+    const fetch = (await import('node-fetch')).default;
+
+    // Busca variaveis atuais
+    const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' }
+    });
+    const envVars = await resGet.json();
+
+    // Monta lista atualizada
+    const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
+    const outras = existente.filter(v => v.key !== 'CREDS_JSON').map(v => ({ key: v.key, value: v.value }));
+    const novas = [...outras, { key: 'CREDS_JSON', value: conteudo }];
+
+    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(novas)
+    });
+    console.log('Sessao salva no Render com sucesso!');
+  } catch (e) {
+    console.error('Erro ao salvar sessao no Render:', e.message);
+  }
+}
 
 http.createServer(async (req, res) => {
   try {
@@ -94,7 +146,6 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
 }
 
-// Pagamento por quantidade de produto: "joao pagou 4 trufas"
 async function processarPagamentoProduto(cliente, quantidade, produto) {
   try {
     const sheet = await getSheet();
@@ -112,17 +163,14 @@ async function processarPagamentoProduto(cliente, quantidade, produto) {
     const pago = (PRECOS[produto] || 0) * Math.min(quantidade, qtdAtual);
     if (novaQtd === 0) {
       await row.delete();
-      return { ok: true, quitou: true, pago, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` };
+      return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` };
     } else {
-      row.set('Quantidade', novaQtd);
-      row.set('Total', novoTotal.toFixed(2));
-      await row.save();
-      return { ok: true, quitou: false, pago, restante: novoTotal, msg: `\u2705 *${cliente}* pagou ${Math.min(quantidade, qtdAtual)} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}` };
+      row.set('Quantidade', novaQtd); row.set('Total', novoTotal.toFixed(2)); await row.save();
+      return { ok: true, msg: `\u2705 *${cliente}* pagou ${Math.min(quantidade, qtdAtual)} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}` };
     }
-  } catch (err) { console.error('Erro pagamento produto:', err.message); return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
+  } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
-// Pagamento por valor em reais: "joao pagou 8 reais" — desconta proporcional
 async function processarPagamentoValor(cliente, valorPago) {
   try {
     const sheet = await getSheet();
@@ -130,59 +178,35 @@ async function processarPagamentoValor(cliente, valorPago) {
     const nomeNorm = cliente.toLowerCase().trim();
     const rowsCliente = rows.filter(r => (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm);
     if (!rowsCliente.length) return { ok: false, msg: `Nenhuma d\u00edvida encontrada para ${cliente}.` };
-
     let totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
     if (valorPago >= totalDevido) {
-      // Quitou tudo
       for (const r of rowsCliente) await r.delete();
-      return { ok: true, quitou: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)} (devia R$ ${totalDevido.toFixed(2)}).` };
+      return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)} (devia R$ ${totalDevido.toFixed(2)}).` };
     }
-
-    // Desconta proporcionalmente
     let restante = valorPago;
     for (const r of rowsCliente) {
       if (restante <= 0) break;
       const totalRow = parseFloat(r.get('Total') || '0');
       const preco = PRECOS[r.get('Produto')] || 5;
-      if (restante >= totalRow) {
-        restante -= totalRow;
-        await r.delete();
-      } else {
-        const novoTotal = totalRow - restante;
-        const novaQtd = Math.ceil(novoTotal / preco);
-        r.set('Total', novoTotal.toFixed(2));
-        r.set('Quantidade', novaQtd);
-        await r.save();
-        restante = 0;
-      }
+      if (restante >= totalRow) { restante -= totalRow; await r.delete(); }
+      else { r.set('Total', (totalRow - restante).toFixed(2)); r.set('Quantidade', Math.ceil((totalRow - restante) / preco)); await r.save(); restante = 0; }
     }
-    const novoTotal = totalDevido - valorPago;
-    return { ok: true, quitou: false, msg: `\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${novoTotal.toFixed(2)}` };
-  } catch (err) { console.error('Erro pagamento valor:', err.message); return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
+    return { ok: true, msg: `\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido - valorPago).toFixed(2)}` };
+  } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
-// Tenta parsear pagamento: "nome pagou X produto" ou "nome pagou X reais"
 function parsearPagamento(texto) {
   const lower = texto.toLowerCase();
   if (!lower.includes('pagou')) return null;
-
-  // "joao pagou 8 reais" ou "joao pagou 8,00"
   const porValor = texto.match(/^(.+?)\s+pagou\s+(\d+[.,]?\d*)\s*(reais|r\$)?$/i);
   if (porValor) {
-    const nome = capitalizarNome(porValor[1].trim());
-    const valor = parseFloat(porValor[2].replace(',', '.'));
-    return { tipo: 'valor', nome, valor };
+    return { tipo: 'valor', nome: capitalizarNome(porValor[1].trim()), valor: parseFloat(porValor[2].replace(',', '.')) };
   }
-
-  // "joao pagou 4 trufas hoje"
   const porProduto = texto.match(/^(.+?)\s+pagou\s+(\d+)\s+(.+?)(?:\s+hoje)?$/i);
   if (porProduto) {
-    const nome = capitalizarNome(porProduto[1].trim());
-    const qtd = parseInt(porProduto[2]);
     const produto = identificarProduto(porProduto[3]);
-    if (produto) return { tipo: 'produto', nome, qtd, produto };
+    if (produto) return { tipo: 'produto', nome: capitalizarNome(porProduto[1].trim()), qtd: parseInt(porProduto[2]), produto };
   }
-
   return null;
 }
 
@@ -212,8 +236,7 @@ async function gerarRelatorio() {
       resposta += `\n\ud83d\udc64 *${nome}*\n`;
       for (const { produto, qtd, total } of itens) {
         const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
-        const label = produto === 'bolo' ? 'Bolo' : 'Trufa';
-        resposta += `   ${emoji} ${label}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
+        resposta += `   ${emoji} ${produto === 'bolo' ? 'Bolo' : 'Trufa'}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
         totalCliente += total;
       }
       resposta += `   \ud83d\udcb0 Deve: *R$ ${totalCliente.toFixed(2)}*\n`;
@@ -221,7 +244,7 @@ async function gerarRelatorio() {
     }
     resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL GERAL: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
-  } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
+  } catch (err) { return '\u274c Erro ao gerar relat\u00f3rio.'; }
 }
 
 function identificarProduto(texto) {
@@ -237,11 +260,9 @@ function parsearMensagem(texto) {
   if (!match) return null;
   const nomeRaw = match[1].trim();
   const qtd = parseInt(match[2]);
-  const produtoRaw = match[3].trim();
-  const produto = identificarProduto(produtoRaw);
+  const produto = identificarProduto(match[3].trim());
   if (!produto || qtd <= 0) return null;
-  const nome = capitalizarNome(nomeRaw);
-  return { nome, quantidade: qtd, produto };
+  return { nome: capitalizarNome(nomeRaw), quantidade: qtd, produto };
 }
 
 let reconectando = false;
@@ -249,9 +270,13 @@ let reconectando = false;
 async function iniciarBot() {
   if (reconectando) return;
   reconectando = true;
+
+  // Restaura sessao salva
+  restaurarSessao();
+
   try {
     const { version } = await fetchLatestBaileysVersion();
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const logger = pino({ level: 'silent' });
     const sock = makeWASocket({
       version,
@@ -266,7 +291,11 @@ async function iniciarBot() {
       maxMsgRetryCount: 3
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+      // Salva sessao no Render sempre que as creds mudarem
+      await salvarSessaoNoRender();
+    });
 
     if (!sock.authState.creds.registered && MEU_NUMERO) {
       setTimeout(async () => {
@@ -285,12 +314,13 @@ async function iniciarBot() {
         const code = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
         console.log(`Conexao fechada. Codigo: ${code}`);
         if (code === DisconnectReason.loggedOut) {
-          try { fs.rmSync('auth_info', { recursive: true, force: true }); } catch(e) {}
+          try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
         }
         setTimeout(iniciarBot, 5000);
       } else if (connection === 'open') {
         botConectado = true; pairingCode = null; qrCodeData = null; reconectando = false;
         console.log('\u2705 Bot conectado!');
+        salvarSessaoNoRender();
       }
     });
 
@@ -301,54 +331,35 @@ async function iniciarBot() {
           if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
           const meta = await sock.groupMetadata(msg.key.remoteJid).catch(() => null);
           if (!meta || !meta.subject.toLowerCase().includes(GRUPO_NOME.toLowerCase())) continue;
-
           let texto = null;
           if (msg.message.conversation) texto = msg.message.conversation;
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
-
           const textoNorm = texto.trim().toLowerCase();
-
-          // Comando relatorio
           if (['relatorio', 'relat\u00f3rio', 'saldo', 'saldos'].includes(textoNorm)) {
-            const rel = await gerarRelatorio();
-            await sock.sendMessage(msg.key.remoteJid, { text: rel });
+            await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorio() });
             continue;
           }
-
-          // Processa cada linha
           const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
           const respostas = [];
-
           for (const linha of linhas) {
-            // Tenta pagamento primeiro
             const pagamento = parsearPagamento(linha);
             if (pagamento) {
-              let result;
-              if (pagamento.tipo === 'valor') {
-                result = await processarPagamentoValor(pagamento.nome, pagamento.valor);
-              } else {
-                result = await processarPagamentoProduto(pagamento.nome, pagamento.qtd, pagamento.produto);
-              }
+              const result = pagamento.tipo === 'valor'
+                ? await processarPagamentoValor(pagamento.nome, pagamento.valor)
+                : await processarPagamentoProduto(pagamento.nome, pagamento.qtd, pagamento.produto);
               respostas.push(result.msg);
               continue;
             }
-
-            // Tenta venda
             const parsed = parsearMensagem(linha);
             if (!parsed) continue;
-            const { nome, quantidade, produto } = parsed;
-            const resultado = await registrarOuAcumular(nome, produto, quantidade);
+            const resultado = await registrarOuAcumular(parsed.nome, parsed.produto, parsed.quantidade);
             if (resultado) {
-              const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
-              const label = produto === 'bolo' ? 'Bolo' : 'Trufa';
-              respostas.push(`${emoji} *${nome}* \u2014 ${label}\n   +${quantidade} agora | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+              const emoji = parsed.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+              respostas.push(`${emoji} *${parsed.nome}* \u2014 ${parsed.produto === 'bolo' ? 'Bolo' : 'Trufa'}\n   +${parsed.quantidade} agora | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
             }
           }
-
-          if (!respostas.length) continue;
-          const respFinal = (respostas.length > 1 ? '' : '') + respostas.join('\n\n');
-          await sock.sendMessage(msg.key.remoteJid, { text: respFinal.trim() });
+          if (respostas.length) await sock.sendMessage(msg.key.remoteJid, { text: respostas.join('\n\n').trim() });
         } catch(e) { console.error('Erro mensagem:', e.message); }
       }
     });
