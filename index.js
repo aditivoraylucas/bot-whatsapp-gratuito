@@ -76,6 +76,18 @@ function identificarProduto(texto) {
   return null;
 }
 
+// Extrai nome do vendedor da mensagem se vier no formato "Nome X produto"
+function extrairNomeVendedor(texto) {
+  // Tenta capturar nome no inicio: "Julia 2 trufas" ou "Rafael 1 bolo"
+  const match = texto.match(/^([A-Za-z\u00C0-\u00FA]+)\s+\d/);
+  if (match) {
+    const possivel = match[1];
+    // Nao e nome se for um produto
+    if (!identificarProduto(possivel)) return possivel;
+  }
+  return null;
+}
+
 function extrairVendas(texto) {
   const vendas = [];
   const regex = /(\d+)\s*([a-zA-Z\u00C0-\u00FA ]+)|([a-zA-Z\u00C0-\u00FA ]+)\s*(\d+)/gi;
@@ -156,14 +168,20 @@ async function iniciarBot() {
           if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
           const meta = await sock.groupMetadata(msg.key.remoteJid).catch(() => null);
           if (!meta || !meta.subject.toLowerCase().includes(GRUPO_NOME.toLowerCase())) continue;
-          const sender = msg.pushName || msg.key.participant?.split('@')[0] || 'Alguem';
+
           let texto = null;
           if (msg.message.conversation) texto = msg.message.conversation;
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
+
           const vendas = extrairVendas(texto);
           if (!vendas.length) continue;
-          let resposta = `\u2705 Anotado, ${sender}!\n`;
+
+          // Usa nome da mensagem se informado, senao usa nome do WhatsApp
+          const nomeNaMensagem = extrairNomeVendedor(texto);
+          const sender = nomeNaMensagem || msg.pushName || msg.key.participant?.split('@')[0] || 'Alguem';
+
+          let resposta = `\u2705 Anotado para ${sender}!\n`;
           let totalGeral = 0;
           for (const { produto, quantidade } of vendas) {
             const total = (PRECOS[produto] || 0) * quantidade;
