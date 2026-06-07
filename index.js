@@ -1,9 +1,11 @@
+process.on('uncaughtException', err => console.error('Erro nao tratado:', err.message));
+process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?.message || err));
+
 const { default: makeWASocket, useMultiFileAuthState, downloadMediaMessage, DisconnectReason, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
-const { execSync } = require('child_process');
 const http = require('http');
 const qrcode = require('qrcode');
 const pino = require('pino');
@@ -25,39 +27,39 @@ let pairingCode = null;
 let botConectado = false;
 let qrCodeData = null;
 
-// Servidor web
+// Servidor web - NUNCA derruba o processo
 http.createServer(async (req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  if (botConectado) {
-    res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:50px">
-      <h1>\u2705 Bot conectado!</h1><p>O bot est\u00e1 funcionando no grupo.</p>
-    </body></html>`);
-  } else if (pairingCode) {
-    res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
-      <h1>\ud83d\udcf1 C\u00f3digo de Pareamento</h1>
-      <p>No WhatsApp: <b>Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</b></p>
-      <p>Digite este c\u00f3digo:</p>
-      <h1 style="font-size:60px;letter-spacing:10px;color:#25D366">${pairingCode}</h1>
-      <p><small>O c\u00f3digo expira em alguns minutos. Atualize a p\u00e1gina para um novo c\u00f3digo.</small></p>
-      <script>setTimeout(()=>location.reload(),60000)</script>
-    </body></html>`);
-  } else if (qrCodeData) {
-    try {
-      const qrImage = await qrcode.toDataURL(qrCodeData);
+  try {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    if (botConectado) {
+      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u2705 Bot conectado!</h1><p>Funcionando normalmente.</p></body></html>');
+    } else if (pairingCode) {
       res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
-        <h1>\ud83d\udcf1 Escaneie o QR Code</h1>
-        <img src="${qrImage}" style="width:300px;height:300px" />
+        <h1>\ud83d\udd11 C\u00f3digo de Pareamento</h1>
+        <p>WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
+        <h1 style="font-size:60px;letter-spacing:10px;color:#25D366;background:#111;padding:20px;border-radius:10px">${pairingCode}</h1>
+        <p>Digite este c\u00f3digo no WhatsApp agora!</p>
         <script>setTimeout(()=>location.reload(),30000)</script>
       </body></html>`);
-    } catch(e) { res.end('<h1>Erro QR</h1>'); }
-  } else {
-    res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:50px">
-      <h1>\u23f3 Iniciando bot...</h1>
-      <p>Aguarde e atualize a p\u00e1gina em alguns segundos.</p>
-      <script>setTimeout(()=>location.reload(),5000)</script>
-    </body></html>`);
+    } else if (qrCodeData) {
+      const qrImage = await qrcode.toDataURL(qrCodeData).catch(() => null);
+      if (qrImage) {
+        res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
+          <h1>\ud83d\udcf1 QR Code</h1>
+          <img src="${qrImage}" style="width:300px;height:300px" />
+          <script>setTimeout(()=>location.reload(),25000)</script>
+        </body></html>`);
+      } else {
+        res.end('<html><body style="text-align:center;padding:50px"><h1>\u23f3 Aguarde...</h1><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
+      }
+    } else {
+      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u23f3 Iniciando bot...</h1><p>Aguarde e atualize em alguns segundos.</p><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
+    }
+  } catch(e) {
+    console.error('Erro servidor web:', e.message);
+    res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');
   }
-}).listen(PORT, () => console.log(`Servidor na porta ${PORT}`));
+}).listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
 // Google Sheets
 async function registrarVenda(vendedor, produto, quantidade) {
@@ -93,97 +95,100 @@ function extrairVendas(texto) {
   return vendas;
 }
 
-async function transcreverAudio(buffer) {
-  try {
-    const tmpInput = `/tmp/audio_${Date.now()}.ogg`;
-    const tmpWav = `/tmp/audio_${Date.now()}.wav`;
-    fs.writeFileSync(tmpInput, buffer);
-    execSync(`ffmpeg -i ${tmpInput} -ar 16000 -ac 1 ${tmpWav} -y 2>/dev/null`);
-    const resultado = execSync(`python3 -c "import whisper; m=whisper.load_model('tiny'); r=m.transcribe('${tmpWav}', language='pt'); print(r['text'])"`, { encoding: 'utf8' });
-    fs.unlinkSync(tmpInput); fs.unlinkSync(tmpWav);
-    return resultado.trim();
-  } catch (err) { console.error('Erro audio:', err.message); return null; }
-}
+let reconectando = false;
 
 async function iniciarBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-  const sock = makeWASocket({
-    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
-    printQRInTerminal: false,
-    logger: pino({ level: 'silent' })
-  });
+  if (reconectando) return;
+  reconectando = true;
 
-  sock.ev.on('creds.update', saveCreds);
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    const logger = pino({ level: 'silent' });
+    const sock = makeWASocket({
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      printQRInTerminal: false,
+      logger,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 10000,
+      retryRequestDelayMs: 2000
+    });
 
-  // Solicita c\u00f3digo de pareamento por n\u00famero
-  if (!sock.authState.creds.registered && MEU_NUMERO) {
-    setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(MEU_NUMERO);
-        pairingCode = code;
-        console.log(`\ud83d\udd11 C\u00f3digo de pareamento: ${code}`);
-        console.log('Acesse a URL do Render para ver o c\u00f3digo!');
-      } catch (e) {
-        console.error('Erro ao solicitar c\u00f3digo:', e.message);
-      }
-    }, 3000);
-  }
+    sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) { qrCodeData = qr; console.log('QR Code gerado como fallback.'); }
-    if (connection === 'close') {
-      botConectado = false;
-      pairingCode = null;
-      const code = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
-      if (code !== DisconnectReason.loggedOut) {
-        console.log('Reconectando...');
+    if (!sock.authState.creds.registered && MEU_NUMERO) {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(MEU_NUMERO);
+          pairingCode = code;
+          console.log(`\ud83d\udd11 Codigo de pareamento: ${code}`);
+        } catch (e) {
+          console.error('Erro codigo pareamento:', e.message);
+        }
+      }, 3000);
+    }
+
+    sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+      if (qr) { qrCodeData = qr; console.log('QR Code gerado.'); }
+      if (connection === 'close') {
+        botConectado = false;
+        pairingCode = null;
+        reconectando = false;
+        const code = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
+        console.log(`Conexao fechada. Codigo: ${code}`);
+        if (code === DisconnectReason.loggedOut) {
+          console.log('Deslogado. Limpando sessao...');
+          try { fs.rmSync('auth_info', { recursive: true, force: true }); } catch(e) {}
+        }
         setTimeout(iniciarBot, 5000);
-      } else {
-        console.log('Deslogado. Limpando sessao...');
-        fs.rmSync('auth_info', { recursive: true, force: true });
-        setTimeout(iniciarBot, 3000);
+      } else if (connection === 'open') {
+        botConectado = true;
+        pairingCode = null;
+        qrCodeData = null;
+        reconectando = false;
+        console.log('\u2705 Bot conectado ao WhatsApp!');
       }
-    } else if (connection === 'open') {
-      botConectado = true; pairingCode = null; qrCodeData = null;
-      console.log('\u2705 Bot conectado ao WhatsApp!');
-    }
-  });
+    });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
-      if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
-      try {
-        const meta = await sock.groupMetadata(msg.key.remoteJid);
-        if (!meta.subject.toLowerCase().includes(GRUPO_NOME.toLowerCase())) continue;
-      } catch { continue; }
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+      for (const msg of messages) {
+        try {
+          if (!msg.message || msg.key.fromMe) continue;
+          if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
+          const meta = await sock.groupMetadata(msg.key.remoteJid).catch(() => null);
+          if (!meta || !meta.subject.toLowerCase().includes(GRUPO_NOME.toLowerCase())) continue;
 
-      const sender = msg.pushName || msg.key.participant?.split('@')[0] || 'Algu\u00e9m';
-      let texto = null;
-      if (msg.message.conversation) texto = msg.message.conversation;
-      else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
-      else if (msg.message.audioMessage) {
-        const buffer = await downloadMediaMessage(msg, 'buffer', {});
-        texto = await transcreverAudio(buffer);
+          const sender = msg.pushName || msg.key.participant?.split('@')[0] || 'Alguem';
+          let texto = null;
+          if (msg.message.conversation) texto = msg.message.conversation;
+          else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
+
+          if (!texto) continue;
+          const vendas = extrairVendas(texto);
+          if (!vendas.length) continue;
+
+          let resposta = `\u2705 Anotado, ${sender}!\n`;
+          let totalGeral = 0;
+          for (const { produto, quantidade } of vendas) {
+            const total = (PRECOS[produto] || 0) * quantidade;
+            totalGeral += total;
+            const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+            resposta += `${emoji} ${produto === 'bolo' ? 'Bolo' : 'Bombom/Trufa'}: ${quantidade} unid. = R$ ${total.toFixed(2)}\n`;
+            await registrarVenda(sender, produto, quantidade);
+          }
+          resposta += `\ud83d\udcb0 Total: R$ ${totalGeral.toFixed(2)}`;
+          await sock.sendMessage(msg.key.remoteJid, { text: resposta });
+        } catch(e) {
+          console.error('Erro mensagem:', e.message);
+        }
       }
-      if (!texto) continue;
+    });
 
-      const vendas = extrairVendas(texto);
-      if (!vendas.length) continue;
-
-      let resposta = `\u2705 Anotado, ${sender}!\n`;
-      let totalGeral = 0;
-      for (const { produto, quantidade } of vendas) {
-        const total = (PRECOS[produto] || 0) * quantidade;
-        totalGeral += total;
-        const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
-        resposta += `${emoji} ${produto === 'bolo' ? 'Bolo' : 'Bombom/Trufa'}: ${quantidade} unid. = R$ ${total.toFixed(2)}\n`;
-        await registrarVenda(sender, produto, quantidade);
-      }
-      resposta += `\ud83d\udcb0 Total: R$ ${totalGeral.toFixed(2)}`;
-      await sock.sendMessage(msg.key.remoteJid, { text: resposta });
-    }
-  });
+  } catch(e) {
+    console.error('Erro ao iniciar bot:', e.message);
+    reconectando = false;
+    setTimeout(iniciarBot, 5000);
+  }
 }
 
 iniciarBot();
