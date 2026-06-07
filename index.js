@@ -1,7 +1,7 @@
 process.on('uncaughtException', err => console.error('Erro nao tratado:', err.message));
 process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?.message || err));
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
@@ -36,6 +36,7 @@ http.createServer(async (req, res) => {
       res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
         <h1>\ud83d\udd11 C\u00f3digo de Pareamento</h1>
         <p>WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
+        <p><b>Toque em "Usar n\u00famero de telefone"</b> na tela do QR Code</p>
         <h1 style="font-size:60px;letter-spacing:10px;color:#25D366;background:#111;padding:20px;border-radius:10px">${pairingCode}</h1>
         <p>Digite este c\u00f3digo no WhatsApp agora!</p>
         <script>setTimeout(()=>location.reload(),30000)</script>
@@ -95,7 +96,7 @@ async function iniciarBot() {
   reconectando = true;
   try {
     const { version } = await fetchLatestBaileysVersion();
-    console.log(`Usando Baileys versao: ${version.join('.')}`);
+    console.log(`Usando WA versao: ${version.join('.')}`);
 
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const logger = pino({ level: 'silent' });
@@ -105,7 +106,7 @@ async function iniciarBot() {
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       printQRInTerminal: false,
       logger,
-      browser: ['Bot Vendas', 'Chrome', '120.0.0'],
+      browser: Browsers.ubuntu('Chrome'),
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 15000,
@@ -120,7 +121,7 @@ async function iniciarBot() {
         try {
           const code = await sock.requestPairingCode(MEU_NUMERO);
           pairingCode = code;
-          console.log(`\ud83d\udd11 Codigo de pareamento: ${code}`);
+          console.log(`\ud83d\udd11 Codigo: ${code}`);
         } catch (e) {
           console.error('Erro codigo pareamento:', e.message);
         }
