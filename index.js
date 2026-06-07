@@ -72,14 +72,11 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
     const rows = await sheet.getRows();
     const nomeNorm = cliente.toLowerCase().trim();
     const prodNorm = produto.toLowerCase().trim();
-
     const existente = rows.find(r =>
       (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm &&
       (r.get('Produto') || '').toLowerCase().trim() === prodNorm
     );
-
     const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-
     if (existente) {
       const qtdAtual = parseInt(existente.get('Quantidade') || '0');
       const novaQtd = qtdAtual + quantidade;
@@ -94,10 +91,103 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
       await sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: total.toFixed(2), UltimaCompra: agora });
       return { nova: true, totalAcumulado: total, qtdAcumulada: quantidade };
     }
-  } catch (err) {
-    console.error('Erro planilha:', err.message);
-    return null;
+  } catch (err) { console.error('Erro planilha:', err.message); return null; }
+}
+
+// Pagamento por quantidade de produto: "joao pagou 4 trufas"
+async function processarPagamentoProduto(cliente, quantidade, produto) {
+  try {
+    const sheet = await getSheet();
+    const rows = await sheet.getRows();
+    const nomeNorm = cliente.toLowerCase().trim();
+    const prodNorm = produto.toLowerCase().trim();
+    const row = rows.find(r =>
+      (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm &&
+      (r.get('Produto') || '').toLowerCase().trim() === prodNorm
+    );
+    if (!row) return { ok: false, msg: `Nenhuma d\u00edvida de ${cliente} com ${produto} encontrada.` };
+    const qtdAtual = parseInt(row.get('Quantidade') || '0');
+    const novaQtd = Math.max(0, qtdAtual - quantidade);
+    const novoTotal = (PRECOS[produto] || 0) * novaQtd;
+    const pago = (PRECOS[produto] || 0) * Math.min(quantidade, qtdAtual);
+    if (novaQtd === 0) {
+      await row.delete();
+      return { ok: true, quitou: true, pago, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` };
+    } else {
+      row.set('Quantidade', novaQtd);
+      row.set('Total', novoTotal.toFixed(2));
+      await row.save();
+      return { ok: true, quitou: false, pago, restante: novoTotal, msg: `\u2705 *${cliente}* pagou ${Math.min(quantidade, qtdAtual)} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}` };
+    }
+  } catch (err) { console.error('Erro pagamento produto:', err.message); return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
+}
+
+// Pagamento por valor em reais: "joao pagou 8 reais" — desconta proporcional
+async function processarPagamentoValor(cliente, valorPago) {
+  try {
+    const sheet = await getSheet();
+    const rows = await sheet.getRows();
+    const nomeNorm = cliente.toLowerCase().trim();
+    const rowsCliente = rows.filter(r => (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm);
+    if (!rowsCliente.length) return { ok: false, msg: `Nenhuma d\u00edvida encontrada para ${cliente}.` };
+
+    let totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
+    if (valorPago >= totalDevido) {
+      // Quitou tudo
+      for (const r of rowsCliente) await r.delete();
+      return { ok: true, quitou: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)} (devia R$ ${totalDevido.toFixed(2)}).` };
+    }
+
+    // Desconta proporcionalmente
+    let restante = valorPago;
+    for (const r of rowsCliente) {
+      if (restante <= 0) break;
+      const totalRow = parseFloat(r.get('Total') || '0');
+      const preco = PRECOS[r.get('Produto')] || 5;
+      if (restante >= totalRow) {
+        restante -= totalRow;
+        await r.delete();
+      } else {
+        const novoTotal = totalRow - restante;
+        const novaQtd = Math.ceil(novoTotal / preco);
+        r.set('Total', novoTotal.toFixed(2));
+        r.set('Quantidade', novaQtd);
+        await r.save();
+        restante = 0;
+      }
+    }
+    const novoTotal = totalDevido - valorPago;
+    return { ok: true, quitou: false, msg: `\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${novoTotal.toFixed(2)}` };
+  } catch (err) { console.error('Erro pagamento valor:', err.message); return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
+}
+
+// Tenta parsear pagamento: "nome pagou X produto" ou "nome pagou X reais"
+function parsearPagamento(texto) {
+  const lower = texto.toLowerCase();
+  if (!lower.includes('pagou')) return null;
+
+  // "joao pagou 8 reais" ou "joao pagou 8,00"
+  const porValor = texto.match(/^(.+?)\s+pagou\s+(\d+[.,]?\d*)\s*(reais|r\$)?$/i);
+  if (porValor) {
+    const nome = capitalizarNome(porValor[1].trim());
+    const valor = parseFloat(porValor[2].replace(',', '.'));
+    return { tipo: 'valor', nome, valor };
   }
+
+  // "joao pagou 4 trufas hoje"
+  const porProduto = texto.match(/^(.+?)\s+pagou\s+(\d+)\s+(.+?)(?:\s+hoje)?$/i);
+  if (porProduto) {
+    const nome = capitalizarNome(porProduto[1].trim());
+    const qtd = parseInt(porProduto[2]);
+    const produto = identificarProduto(porProduto[3]);
+    if (produto) return { tipo: 'produto', nome, qtd, produto };
+  }
+
+  return null;
+}
+
+function capitalizarNome(nome) {
+  return nome.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 }
 
 async function gerarRelatorio() {
@@ -105,8 +195,6 @@ async function gerarRelatorio() {
     const sheet = await getSheet();
     const rows = await sheet.getRows();
     if (!rows.length) return '\ud83d\udcca Nenhuma venda registrada ainda.';
-
-    // Agrupa por cliente
     const clientes = {};
     for (const row of rows) {
       const nome = (row.get('Cliente') || '').trim();
@@ -117,11 +205,8 @@ async function gerarRelatorio() {
       if (!clientes[nome]) clientes[nome] = [];
       clientes[nome].push({ produto, qtd, total });
     }
-
-    let resposta = '\ud83d\udcca *Relat\u00f3rio de Saldos*\n';
-    resposta += '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta = '\ud83d\udcca *Relat\u00f3rio de Saldos*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral = 0;
-
     for (const [nome, itens] of Object.entries(clientes)) {
       let totalCliente = 0;
       resposta += `\n\ud83d\udc64 *${nome}*\n`;
@@ -134,18 +219,13 @@ async function gerarRelatorio() {
       resposta += `   \ud83d\udcb0 Deve: *R$ ${totalCliente.toFixed(2)}*\n`;
       totalGeral += totalCliente;
     }
-
-    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
-    resposta += `\ud83d\udcb5 *TOTAL GERAL: R$ ${totalGeral.toFixed(2)}*`;
+    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL GERAL: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
-  } catch (err) {
-    console.error('Erro relatorio:', err.message);
-    return '\u274c Erro ao gerar relat\u00f3rio. Tente novamente.';
-  }
+  } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
 }
 
 function identificarProduto(texto) {
-  const lower = texto.toLowerCase();
+  const lower = (texto || '').toLowerCase();
   for (const [produto, sins] of Object.entries(SINONIMOS))
     for (const sin of sins)
       if (lower.includes(sin)) return produto;
@@ -160,7 +240,7 @@ function parsearMensagem(texto) {
   const produtoRaw = match[3].trim();
   const produto = identificarProduto(produtoRaw);
   if (!produto || qtd <= 0) return null;
-  const nome = nomeRaw.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+  const nome = capitalizarNome(nomeRaw);
   return { nome, quantidade: qtd, produto };
 }
 
@@ -173,7 +253,6 @@ async function iniciarBot() {
     const { version } = await fetchLatestBaileysVersion();
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const logger = pino({ level: 'silent' });
-
     const sock = makeWASocket({
       version,
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
@@ -202,9 +281,7 @@ async function iniciarBot() {
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
       if (qr) { qrCodeData = qr; }
       if (connection === 'close') {
-        botConectado = false;
-        pairingCode = null;
-        reconectando = false;
+        botConectado = false; pairingCode = null; reconectando = false;
         const code = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
         console.log(`Conexao fechada. Codigo: ${code}`);
         if (code === DisconnectReason.loggedOut) {
@@ -212,10 +289,7 @@ async function iniciarBot() {
         }
         setTimeout(iniciarBot, 5000);
       } else if (connection === 'open') {
-        botConectado = true;
-        pairingCode = null;
-        qrCodeData = null;
-        reconectando = false;
+        botConectado = true; pairingCode = null; qrCodeData = null; reconectando = false;
         console.log('\u2705 Bot conectado!');
       }
     });
@@ -236,35 +310,45 @@ async function iniciarBot() {
           const textoNorm = texto.trim().toLowerCase();
 
           // Comando relatorio
-          if (textoNorm === 'relatorio' || textoNorm === 'relatório' || textoNorm === 'saldo' || textoNorm === 'saldos') {
+          if (['relatorio', 'relat\u00f3rio', 'saldo', 'saldos'].includes(textoNorm)) {
             const rel = await gerarRelatorio();
             await sock.sendMessage(msg.key.remoteJid, { text: rel });
             continue;
           }
 
-          // Processa vendas linha por linha
+          // Processa cada linha
           const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
-          const resultados = [];
+          const respostas = [];
 
           for (const linha of linhas) {
+            // Tenta pagamento primeiro
+            const pagamento = parsearPagamento(linha);
+            if (pagamento) {
+              let result;
+              if (pagamento.tipo === 'valor') {
+                result = await processarPagamentoValor(pagamento.nome, pagamento.valor);
+              } else {
+                result = await processarPagamentoProduto(pagamento.nome, pagamento.qtd, pagamento.produto);
+              }
+              respostas.push(result.msg);
+              continue;
+            }
+
+            // Tenta venda
             const parsed = parsearMensagem(linha);
             if (!parsed) continue;
             const { nome, quantidade, produto } = parsed;
             const resultado = await registrarOuAcumular(nome, produto, quantidade);
-            if (resultado) resultados.push({ nome, quantidade, produto, ...resultado });
+            if (resultado) {
+              const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+              const label = produto === 'bolo' ? 'Bolo' : 'Trufa';
+              respostas.push(`${emoji} *${nome}* \u2014 ${label}\n   +${quantidade} agora | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+            }
           }
 
-          if (!resultados.length) continue;
-
-          let resposta = '\u2705 Anotado!\n';
-          for (const r of resultados) {
-            const emoji = r.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
-            const label = r.produto === 'bolo' ? 'Bolo' : 'Trufa';
-            resposta += `\n${emoji} *${r.nome}* \u2014 ${label}\n`;
-            resposta += `   +${r.quantidade} agora | Total: ${r.qtdAcumulada} unid. = R$ ${r.totalAcumulado.toFixed(2)}\n`;
-          }
-
-          await sock.sendMessage(msg.key.remoteJid, { text: resposta.trim() });
+          if (!respostas.length) continue;
+          const respFinal = (respostas.length > 1 ? '' : '') + respostas.join('\n\n');
+          await sock.sendMessage(msg.key.remoteJid, { text: respFinal.trim() });
         } catch(e) { console.error('Erro mensagem:', e.message); }
       }
     });
