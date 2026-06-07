@@ -7,12 +7,13 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.0",
+    "@whiskeysockets/baileys": "latest",
     "@hapi/boom": "^10.0.1",
     "google-spreadsheet": "^4.1.4",
     "google-auth-library": "^9.11.0",
     "qrcode": "^1.5.3",
-    "pino": "^8.21.0"
+    "pino": "^8.21.0",
+    "sharp": "^0.33.0"
   },
   "engines": {
     "node": ">=18.0.0"

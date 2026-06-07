@@ -1,7 +1,7 @@
 process.on('uncaughtException', err => console.error('Erro nao tratado:', err.message));
 process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?.message || err));
 
-const { default: makeWASocket, useMultiFileAuthState, downloadMediaMessage, DisconnectReason, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
@@ -27,7 +27,6 @@ let pairingCode = null;
 let botConectado = false;
 let qrCodeData = null;
 
-// Servidor web - NUNCA derruba o processo
 http.createServer(async (req, res) => {
   try {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -43,25 +42,19 @@ http.createServer(async (req, res) => {
       </body></html>`);
     } else if (qrCodeData) {
       const qrImage = await qrcode.toDataURL(qrCodeData).catch(() => null);
-      if (qrImage) {
-        res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
-          <h1>\ud83d\udcf1 QR Code</h1>
-          <img src="${qrImage}" style="width:300px;height:300px" />
-          <script>setTimeout(()=>location.reload(),25000)</script>
-        </body></html>`);
-      } else {
-        res.end('<html><body style="text-align:center;padding:50px"><h1>\u23f3 Aguarde...</h1><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
-      }
+      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
+        <h1>\ud83d\udcf1 QR Code</h1>
+        ${qrImage ? `<img src="${qrImage}" style="width:300px;height:300px" />` : '<p>Gerando...</p>'}
+        <script>setTimeout(()=>location.reload(),25000)</script>
+      </body></html>`);
     } else {
       res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u23f3 Iniciando bot...</h1><p>Aguarde e atualize em alguns segundos.</p><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
     }
   } catch(e) {
-    console.error('Erro servidor web:', e.message);
     res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');
   }
 }).listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
-// Google Sheets
 async function registrarVenda(vendedor, produto, quantidade) {
   try {
     const auth = new JWT({ email: GOOGLE_SERVICE_ACCOUNT_EMAIL, key: GOOGLE_PRIVATE_KEY, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
@@ -100,18 +93,24 @@ let reconectando = false;
 async function iniciarBot() {
   if (reconectando) return;
   reconectando = true;
-
   try {
+    const { version } = await fetchLatestBaileysVersion();
+    console.log(`Usando Baileys versao: ${version.join('.')}`);
+
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const logger = pino({ level: 'silent' });
+
     const sock = makeWASocket({
+      version,
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       printQRInTerminal: false,
       logger,
+      browser: ['Bot Vendas', 'Chrome', '120.0.0'],
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 10000,
-      retryRequestDelayMs: 2000
+      keepAliveIntervalMs: 15000,
+      retryRequestDelayMs: 3000,
+      maxMsgRetryCount: 3
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -125,11 +124,11 @@ async function iniciarBot() {
         } catch (e) {
           console.error('Erro codigo pareamento:', e.message);
         }
-      }, 3000);
+      }, 5000);
     }
 
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-      if (qr) { qrCodeData = qr; console.log('QR Code gerado.'); }
+      if (qr) { qrCodeData = qr; }
       if (connection === 'close') {
         botConectado = false;
         pairingCode = null;
@@ -137,7 +136,6 @@ async function iniciarBot() {
         const code = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
         console.log(`Conexao fechada. Codigo: ${code}`);
         if (code === DisconnectReason.loggedOut) {
-          console.log('Deslogado. Limpando sessao...');
           try { fs.rmSync('auth_info', { recursive: true, force: true }); } catch(e) {}
         }
         setTimeout(iniciarBot, 5000);
@@ -157,16 +155,13 @@ async function iniciarBot() {
           if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
           const meta = await sock.groupMetadata(msg.key.remoteJid).catch(() => null);
           if (!meta || !meta.subject.toLowerCase().includes(GRUPO_NOME.toLowerCase())) continue;
-
           const sender = msg.pushName || msg.key.participant?.split('@')[0] || 'Alguem';
           let texto = null;
           if (msg.message.conversation) texto = msg.message.conversation;
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
-
           if (!texto) continue;
           const vendas = extrairVendas(texto);
           if (!vendas.length) continue;
-
           let resposta = `\u2705 Anotado, ${sender}!\n`;
           let totalGeral = 0;
           for (const { produto, quantidade } of vendas) {
@@ -178,9 +173,7 @@ async function iniciarBot() {
           }
           resposta += `\ud83d\udcb0 Total: R$ ${totalGeral.toFixed(2)}`;
           await sock.sendMessage(msg.key.remoteJid, { text: resposta });
-        } catch(e) {
-          console.error('Erro mensagem:', e.message);
-        }
+        } catch(e) { console.error('Erro mensagem:', e.message); }
       }
     });
 
