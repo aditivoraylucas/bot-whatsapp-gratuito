@@ -66,7 +66,6 @@ async function getSheet() {
   return doc.sheetsByIndex[0];
 }
 
-// Acumula compras do cliente: atualiza linha existente ou cria nova
 async function registrarOuAcumular(cliente, produto, quantidade) {
   try {
     const sheet = await getSheet();
@@ -74,7 +73,6 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
     const nomeNorm = cliente.toLowerCase().trim();
     const prodNorm = produto.toLowerCase().trim();
 
-    // Procura linha existente do mesmo cliente + produto
     const existente = rows.find(r =>
       (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm &&
       (r.get('Produto') || '').toLowerCase().trim() === prodNorm
@@ -93,18 +91,56 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
       return { nova: false, totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
     } else {
       const total = (PRECOS[produto] || 0) * quantidade;
-      await sheet.addRow({
-        Cliente: cliente,
-        Produto: produto,
-        Quantidade: quantidade,
-        Total: total.toFixed(2),
-        UltimaCompra: agora
-      });
+      await sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: total.toFixed(2), UltimaCompra: agora });
       return { nova: true, totalAcumulado: total, qtdAcumulada: quantidade };
     }
   } catch (err) {
     console.error('Erro planilha:', err.message);
     return null;
+  }
+}
+
+async function gerarRelatorio() {
+  try {
+    const sheet = await getSheet();
+    const rows = await sheet.getRows();
+    if (!rows.length) return '\ud83d\udcca Nenhuma venda registrada ainda.';
+
+    // Agrupa por cliente
+    const clientes = {};
+    for (const row of rows) {
+      const nome = (row.get('Cliente') || '').trim();
+      const produto = (row.get('Produto') || '').trim();
+      const qtd = parseInt(row.get('Quantidade') || '0');
+      const total = parseFloat(row.get('Total') || '0');
+      if (!nome) continue;
+      if (!clientes[nome]) clientes[nome] = [];
+      clientes[nome].push({ produto, qtd, total });
+    }
+
+    let resposta = '\ud83d\udcca *Relat\u00f3rio de Saldos*\n';
+    resposta += '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let totalGeral = 0;
+
+    for (const [nome, itens] of Object.entries(clientes)) {
+      let totalCliente = 0;
+      resposta += `\n\ud83d\udc64 *${nome}*\n`;
+      for (const { produto, qtd, total } of itens) {
+        const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+        const label = produto === 'bolo' ? 'Bolo' : 'Trufa';
+        resposta += `   ${emoji} ${label}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
+        totalCliente += total;
+      }
+      resposta += `   \ud83d\udcb0 Deve: *R$ ${totalCliente.toFixed(2)}*\n`;
+      totalGeral += totalCliente;
+    }
+
+    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    resposta += `\ud83d\udcb5 *TOTAL GERAL: R$ ${totalGeral.toFixed(2)}*`;
+    return resposta;
+  } catch (err) {
+    console.error('Erro relatorio:', err.message);
+    return '\u274c Erro ao gerar relat\u00f3rio. Tente novamente.';
   }
 }
 
@@ -116,23 +152,15 @@ function identificarProduto(texto) {
   return null;
 }
 
-// Parseia mensagem no formato: "Nome Completo X produto"
-// Ex: "jose 2 trufas", "joao do barril 2 trufas"
 function parsearMensagem(texto) {
-  // Regex: captura (tudo antes do numero) (numero) (resto)
   const match = texto.match(/^(.+?)\s+(\d+)\s+(.+)$/);
   if (!match) return null;
-
   const nomeRaw = match[1].trim();
   const qtd = parseInt(match[2]);
   const produtoRaw = match[3].trim();
   const produto = identificarProduto(produtoRaw);
-
   if (!produto || qtd <= 0) return null;
-
-  // Capitaliza o nome
   const nome = nomeRaw.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-
   return { nome, quantidade: qtd, produto };
 }
 
@@ -143,8 +171,6 @@ async function iniciarBot() {
   reconectando = true;
   try {
     const { version } = await fetchLatestBaileysVersion();
-    console.log(`Usando WA versao: ${version.join('.')}`);
-
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const logger = pino({ level: 'silent' });
 
@@ -169,9 +195,7 @@ async function iniciarBot() {
           const code = await sock.requestPairingCode(MEU_NUMERO);
           pairingCode = code;
           console.log(`\ud83d\udd11 Codigo: ${code}`);
-        } catch (e) {
-          console.error('Erro codigo pareamento:', e.message);
-        }
+        } catch (e) { console.error('Erro codigo pareamento:', e.message); }
       }, 5000);
     }
 
@@ -192,7 +216,7 @@ async function iniciarBot() {
         pairingCode = null;
         qrCodeData = null;
         reconectando = false;
-        console.log('\u2705 Bot conectado ao WhatsApp!');
+        console.log('\u2705 Bot conectado!');
       }
     });
 
@@ -209,7 +233,16 @@ async function iniciarBot() {
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
 
-          // Processa cada linha da mensagem separadamente
+          const textoNorm = texto.trim().toLowerCase();
+
+          // Comando relatorio
+          if (textoNorm === 'relatorio' || textoNorm === 'relatório' || textoNorm === 'saldo' || textoNorm === 'saldos') {
+            const rel = await gerarRelatorio();
+            await sock.sendMessage(msg.key.remoteJid, { text: rel });
+            continue;
+          }
+
+          // Processa vendas linha por linha
           const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
           const resultados = [];
 
