@@ -56,16 +56,56 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
-async function registrarVenda(vendedor, produto, quantidade) {
+function getAuth() {
+  return new JWT({ email: GOOGLE_SERVICE_ACCOUNT_EMAIL, key: GOOGLE_PRIVATE_KEY, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
+}
+
+async function getSheet() {
+  const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
+  await doc.loadInfo();
+  return doc.sheetsByIndex[0];
+}
+
+// Acumula compras do cliente: atualiza linha existente ou cria nova
+async function registrarOuAcumular(cliente, produto, quantidade) {
   try {
-    const auth = new JWT({ email: GOOGLE_SERVICE_ACCOUNT_EMAIL, key: GOOGLE_PRIVATE_KEY, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
-    const doc = new GoogleSpreadsheet(SPREADSHEET_ID, auth);
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
+    const sheet = await getSheet();
+    const rows = await sheet.getRows();
+    const nomeNorm = cliente.toLowerCase().trim();
+    const prodNorm = produto.toLowerCase().trim();
+
+    // Procura linha existente do mesmo cliente + produto
+    const existente = rows.find(r =>
+      (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm &&
+      (r.get('Produto') || '').toLowerCase().trim() === prodNorm
+    );
+
     const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-    await sheet.addRow({ Data: agora, Vendedor: vendedor, Produto: produto, Quantidade: quantidade, Total: (PRECOS[produto] || 0) * quantidade });
-    return true;
-  } catch (err) { console.error('Erro planilha:', err.message); return false; }
+
+    if (existente) {
+      const qtdAtual = parseInt(existente.get('Quantidade') || '0');
+      const novaQtd = qtdAtual + quantidade;
+      const novoTotal = (PRECOS[produto] || 0) * novaQtd;
+      existente.set('Quantidade', novaQtd);
+      existente.set('Total', novoTotal.toFixed(2));
+      existente.set('UltimaCompra', agora);
+      await existente.save();
+      return { nova: false, totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
+    } else {
+      const total = (PRECOS[produto] || 0) * quantidade;
+      await sheet.addRow({
+        Cliente: cliente,
+        Produto: produto,
+        Quantidade: quantidade,
+        Total: total.toFixed(2),
+        UltimaCompra: agora
+      });
+      return { nova: true, totalAcumulado: total, qtdAcumulada: quantidade };
+    }
+  } catch (err) {
+    console.error('Erro planilha:', err.message);
+    return null;
+  }
 }
 
 function identificarProduto(texto) {
@@ -76,29 +116,24 @@ function identificarProduto(texto) {
   return null;
 }
 
-// Extrai nome do vendedor da mensagem se vier no formato "Nome X produto"
-function extrairNomeVendedor(texto) {
-  // Tenta capturar nome no inicio: "Julia 2 trufas" ou "Rafael 1 bolo"
-  const match = texto.match(/^([A-Za-z\u00C0-\u00FA]+)\s+\d/);
-  if (match) {
-    const possivel = match[1];
-    // Nao e nome se for um produto
-    if (!identificarProduto(possivel)) return possivel;
-  }
-  return null;
-}
+// Parseia mensagem no formato: "Nome Completo X produto"
+// Ex: "jose 2 trufas", "joao do barril 2 trufas"
+function parsearMensagem(texto) {
+  // Regex: captura (tudo antes do numero) (numero) (resto)
+  const match = texto.match(/^(.+?)\s+(\d+)\s+(.+)$/);
+  if (!match) return null;
 
-function extrairVendas(texto) {
-  const vendas = [];
-  const regex = /(\d+)\s*([a-zA-Z\u00C0-\u00FA ]+)|([a-zA-Z\u00C0-\u00FA ]+)\s*(\d+)/gi;
-  let match;
-  while ((match = regex.exec(texto)) !== null) {
-    const qtd = parseInt(match[1] || match[4]);
-    const nomeProd = (match[2] || match[3] || '').trim();
-    const produto = identificarProduto(nomeProd);
-    if (produto && qtd > 0) vendas.push({ produto, quantidade: qtd });
-  }
-  return vendas;
+  const nomeRaw = match[1].trim();
+  const qtd = parseInt(match[2]);
+  const produtoRaw = match[3].trim();
+  const produto = identificarProduto(produtoRaw);
+
+  if (!produto || qtd <= 0) return null;
+
+  // Capitaliza o nome
+  const nome = nomeRaw.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+
+  return { nome, quantidade: qtd, produto };
 }
 
 let reconectando = false;
@@ -174,24 +209,29 @@ async function iniciarBot() {
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
 
-          const vendas = extrairVendas(texto);
-          if (!vendas.length) continue;
+          // Processa cada linha da mensagem separadamente
+          const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
+          const resultados = [];
 
-          // Usa nome da mensagem se informado, senao usa nome do WhatsApp
-          const nomeNaMensagem = extrairNomeVendedor(texto);
-          const sender = nomeNaMensagem || msg.pushName || msg.key.participant?.split('@')[0] || 'Alguem';
-
-          let resposta = `\u2705 Anotado para ${sender}!\n`;
-          let totalGeral = 0;
-          for (const { produto, quantidade } of vendas) {
-            const total = (PRECOS[produto] || 0) * quantidade;
-            totalGeral += total;
-            const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
-            resposta += `${emoji} ${produto === 'bolo' ? 'Bolo' : 'Bombom/Trufa'}: ${quantidade} unid. = R$ ${total.toFixed(2)}\n`;
-            await registrarVenda(sender, produto, quantidade);
+          for (const linha of linhas) {
+            const parsed = parsearMensagem(linha);
+            if (!parsed) continue;
+            const { nome, quantidade, produto } = parsed;
+            const resultado = await registrarOuAcumular(nome, produto, quantidade);
+            if (resultado) resultados.push({ nome, quantidade, produto, ...resultado });
           }
-          resposta += `\ud83d\udcb0 Total: R$ ${totalGeral.toFixed(2)}`;
-          await sock.sendMessage(msg.key.remoteJid, { text: resposta });
+
+          if (!resultados.length) continue;
+
+          let resposta = '\u2705 Anotado!\n';
+          for (const r of resultados) {
+            const emoji = r.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+            const label = r.produto === 'bolo' ? 'Bolo' : 'Trufa';
+            resposta += `\n${emoji} *${r.nome}* \u2014 ${label}\n`;
+            resposta += `   +${r.quantidade} agora | Total: ${r.qtdAcumulada} unid. = R$ ${r.totalAcumulado.toFixed(2)}\n`;
+          }
+
+          await sock.sendMessage(msg.key.remoteJid, { text: resposta.trim() });
         } catch(e) { console.error('Erro mensagem:', e.message); }
       }
     });
