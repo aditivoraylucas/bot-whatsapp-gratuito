@@ -1,22 +1,43 @@
-# Bot WhatsApp 100% GRATUITO
+# 🤖 Bot WhatsApp - Controle de Vendas
 
-Usa Python + Flask + Google Apps Script.
+Bot 100% gratuito para registrar vendas de **Bombom/Trufa** e **Bolo/Bolo de Pote** via WhatsApp.
 
-## Comandos
-- add João 2 bombom 1 bolo
-- pag João 1 bombom
-- ver João
-- relatorio
-- del João
-- ajuda
+## ✨ Funcionalidades
+- ✅ Responde mensagens de texto e **áudios** (até 5 segundos)
+- ✅ Funciona em **grupo do WhatsApp**
+- ✅ Registra automaticamente na **Google Sheets**
+- ✅ Calcula o total em R$
+- ✅ Roda 100% gratuito no **Render**
 
-## Valores
-- Bombom = R$ 5
-- Bolo = R$ 12
+## 💬 Como usar no grupo
 
-## Arquivos
-- bot_whatsapp_puro.py
-- requirements.txt
-- pyproject.toml
-- .gitignore
-- Codigo_Google_Apps_Script.gs
+Mande uma mensagem ou áudio:
+```
+vendi 3 trufa e 2 bolo
+```
+
+O bot responde:
+```
+✅ Anotado, Maria!
+🍫 Bombom/Trufa: 3 unid. = R$ 15,00
+🎂 Bolo/Bolo de Pote: 2 unid. = R$ 24,00
+💰 Total: R$ 39,00
+```
+
+## 🛠️ Configuração
+
+### Variáveis de ambiente no Render
+| Variável | Descrição |
+|---|---|
+| `GRUPO_NOME` | Parte do nome do grupo WhatsApp (ex: `vendas`) |
+| `SPREADSHEET_ID` | ID da planilha Google Sheets |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Email da conta de serviço Google |
+| `GOOGLE_PRIVATE_KEY` | Chave privada da conta de serviço |
+
+### Produtos e preços
+- 🍫 **Bombom/Trufa**: R$ 5,00
+- 🎂 **Bolo/Bolo de Pote**: R$ 12,00
+
+### Apelidos aceitos
+- Trufa: `trufa`, `trufas`, `trufinha`, `bombom`, `bombons`
+- Bolo: `bolo`, `bolinho`, `bolo de pote`, `bolo pote`

@@ -1,1 +1,1 @@
-web: gunicorn bot_whatsapp_puro:app
+web: node index.js
