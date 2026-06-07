@@ -1,5 +1,7 @@
-from flask import Flask, request
-import os, re, requests
+from flask import Flask, request, jsonify
+import os
+import re
+import requests
 
 app = Flask(__name__)
 
@@ -9,36 +11,52 @@ SEU_NUMERO = os.environ.get("SEU_NUMERO", "")
 PRECO_BOMBOM = 5.00
 PRECO_BOLO = 12.00
 
+
 def get_nome(msg, prefixo):
     sem = msg.replace(prefixo, "").strip()
-    m = re.match(r"^([a-záãâêíóôõúç\s]+?)(?=\s*\d|$)", sem, re.I)
-    return m.group(1).strip() if m else sem.split()[0]
+    partes = sem.split()
+    nome = []
+    for p in partes:
+        if p.isdigit():
+            break
+        nome.append(p)
+    return " ".join(nome)
+
 
 def parse_produtos(texto):
     bombom = 0
     bolo = 0
     m1 = re.search(r"(\d+)\s*bombom", texto)
     m2 = re.search(r"(\d+)\s*bolo", texto)
-    if m1: bombom = int(m1.group(1))
-    if m2: bolo = int(m2.group(1))
+    if m1:
+        bombom = int(m1.group(1))
+    if m2:
+        bolo = int(m2.group(1))
     return bombom, bolo
+
 
 def chamar_planilha(payload):
     if not GOOGLE_SCRIPT_URL:
-        return "Configure GOOGLE_SCRIPT_URL"
-    r = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=15)
-    return r.json().get("reply", "Sem resposta")
+        return "Configure GOOGLE_SCRIPT_URL nas variaveis de ambiente"
+    try:
+        r = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=15)
+        return r.json().get("reply", "Sem resposta da planilha")
+    except Exception as e:
+        return "Erro ao acessar planilha: " + str(e)
+
 
 @app.route("/")
 def home():
-    return "Bot WhatsApp rodando"
+    return "Bot WhatsApp rodando com sucesso!"
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json or {}
     msg = (data.get("message", "") or "").lower().strip()
+
     if not msg:
-        return {"ok": True}
+        return jsonify({"ok": True})
 
     if msg.startswith("add "):
         nome = get_nome(msg, "add ")
@@ -57,11 +75,13 @@ def webhook():
         nome = msg.replace("del ", "").strip()
         resposta = chamar_planilha({"acao": "del", "nome": nome})
     elif msg == "ajuda":
-        resposta = "Comandos: add / pag / ver / relatorio / del / ajuda"
+        resposta = "Comandos disponíveis:\nadd Nome X bombom Y bolo\npag Nome X bombom\nver Nome\nrelatorio\ndel Nome\najuda"
     else:
         resposta = "Comando nao reconhecido. Digite ajuda"
 
-    return {"reply": resposta, "ok": True}
+    return jsonify({"reply": resposta, "ok": True})
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
