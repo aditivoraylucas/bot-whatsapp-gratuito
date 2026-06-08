@@ -29,7 +29,7 @@ const SINONIMOS = {
 
 const NUMEROS_EXTENSO = {
   'um': 1, 'uma': 1, 'dois': 2, 'duas': 2,
-  'tres': 3, 'tres': 3, 'quatro': 4, 'cinco': 5,
+  'tres': 3, 'quatro': 4, 'cinco': 5,
   'seis': 6, 'sete': 7, 'oito': 8, 'nove': 9,
   'dez': 10, 'onze': 11, 'doze': 12, 'treze': 13,
   'quatorze': 14, 'catorze': 14, 'quinze': 15,
@@ -37,7 +37,15 @@ const NUMEROS_EXTENSO = {
   'dezenove': 19, 'vinte': 20
 };
 
-function norm(t) { return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim(); }
+// Normaliza texto: minusculo + sem acentos + sem espacos extras
+function norm(t) {
+  return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+}
+
+// Compara dois nomes ignorando acentos, maiusculas e espacos extras
+function mesmoNome(a, b) {
+  return norm(a) === norm(b);
+}
 
 function converterNumero(texto) {
   const n = norm(texto);
@@ -46,8 +54,6 @@ function converterNumero(texto) {
   return null;
 }
 
-// Extrai valor monetario de uma string
-// Aceita: 10, 10.50, 10,50, R$10, r$ 10, "10 reais", "10,50 reais"
 function extrairValor(texto) {
   const t = norm(texto).replace(/r\$\s*/g, '').replace(/reais/g, '').replace(/pix/g, '').trim();
   const m = t.match(/(\d+[,.]?\d*)/);
@@ -132,11 +138,24 @@ async function getSheetHistorico() {
 
 function agora() { return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 
-async function registrarOuAcumular(cliente, produto, quantidade) {
+// Busca nome do cliente na planilha ignorando acentos/maiusculas
+// Retorna o nome como esta cadastrado, ou o nome enviado se nao existir
+async function resolverNomeCliente(sheet, rows, nomeEnviado) {
+  const existing = rows.find(r => mesmoNome(r.get('Cliente'), nomeEnviado));
+  return existing ? existing.get('Cliente') : capitalizarNome(nomeEnviado);
+}
+
+async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
-    const existente = rows.find(r => norm(r.get('Cliente')) === norm(cliente) && norm(r.get('Produto')) === norm(produto));
+    // Busca por nome normalizado (ignora acento/case)
+    const existente = rows.find(r =>
+      mesmoNome(r.get('Cliente'), clienteEnviado) &&
+      norm(r.get('Produto')) === norm(produto)
+    );
+    // Usa nome ja cadastrado se existir, senao capitaliza o enviado
+    const cliente = existente ? existente.get('Cliente') : capitalizarNome(clienteEnviado);
     const total = (PRECOS[produto] || 0) * quantidade;
     if (existente) {
       const novaQtd = parseInt(existente.get('Quantidade') || '0') + quantidade;
@@ -145,21 +164,25 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
       await existente.save();
       const hist = await getSheetHistorico();
       await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
-      return { totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
+      return { cliente, totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
     } else {
       await sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: total.toFixed(2), UltimaCompra: agora() });
       const hist = await getSheetHistorico();
       await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
-      return { totalAcumulado: total, qtdAcumulada: quantidade };
+      return { cliente, totalAcumulado: total, qtdAcumulada: quantidade };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
 }
 
-async function processarPagamentoProduto(cliente, quantidade, produto) {
+async function processarPagamentoProduto(clienteEnviado, quantidade, produto) {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
-    const row = rows.find(r => norm(r.get('Cliente')) === norm(cliente) && norm(r.get('Produto')) === norm(produto));
+    const row = rows.find(r =>
+      mesmoNome(r.get('Cliente'), clienteEnviado) &&
+      norm(r.get('Produto')) === norm(produto)
+    );
+    const cliente = row ? row.get('Cliente') : capitalizarNome(clienteEnviado);
     if (!row) return { ok: false, msg: `Nenhuma d\u00edvida de ${cliente} com ${produto} encontrada.` };
     const qtdAtual = parseInt(row.get('Quantidade') || '0');
     const qtdPaga = Math.min(quantidade, qtdAtual);
@@ -174,11 +197,12 @@ async function processarPagamentoProduto(cliente, quantidade, produto) {
   } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
-async function processarPagamentoValor(cliente, valorPago) {
+async function processarPagamentoValor(clienteEnviado, valorPago) {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
-    const rowsCliente = rows.filter(r => norm(r.get('Cliente')) === norm(cliente));
+    const rowsCliente = rows.filter(r => mesmoNome(r.get('Cliente'), clienteEnviado));
+    const cliente = rowsCliente.length ? rowsCliente[0].get('Cliente') : capitalizarNome(clienteEnviado);
     if (!rowsCliente.length) return { ok: false, msg: `Nenhuma d\u00edvida encontrada para ${cliente}.` };
     let totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
     const hist = await getSheetHistorico();
@@ -252,46 +276,25 @@ async function gerarRelatorioGeral() {
 }
 
 function identificarProduto(texto) {
-  const lower = (texto || '').toLowerCase();
+  const n = norm(texto);
   for (const [produto, sins] of Object.entries(SINONIMOS))
     for (const sin of sins)
-      if (lower.includes(sin)) return produto;
+      if (n.includes(norm(sin))) return produto;
   return null;
 }
 
 function capitalizarNome(nome) {
-  return nome.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+  return nome.trim().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 }
 
-/**
- * Detecta pagamento em linguagem natural.
- * Exemplos aceitos:
- *   julia pagou 10
- *   julia pagou 10 reais
- *   julia pagou R$10
- *   julia pix 10
- *   julia pix de 10
- *   julia pix 10 reais
- *   julia pagou pix de 10,50
- *   julia pagou duas trufas
- *   julia pagou 2 trufas
- */
 function parsearPagamento(texto) {
   const t = norm(texto);
-
-  // Detecta palavras-chave de pagamento
   const temPagamento = /\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t);
   if (!temPagamento) return null;
-
-  // Tenta extrair nome: tudo antes da palavra-chave de pagamento
   const matchNome = texto.match(/^(.+?)\s+(?:pagou|pix|transferiu|depositou|mandou|enviou)/i);
   if (!matchNome) return null;
-  const nome = capitalizarNome(matchNome[1].trim());
-
-  // Pega o restante apos a palavra-chave
+  const nome = matchNome[1].trim();
   const resto = texto.slice(matchNome[0].length).trim();
-
-  // Tenta identificar produto no restante: "duas trufas", "2 bolos"
   const palavras = resto.split(/\s+/);
   for (let i = 0; i < palavras.length; i++) {
     const qtd = converterNumero(palavras[i]);
@@ -300,33 +303,89 @@ function parsearPagamento(texto) {
     const produto = identificarProduto(prodTexto);
     if (produto) return { tipo: 'produto', nome, qtd, produto };
   }
-
-  // Tenta extrair valor monetario do restante
-  // Remove palavras desnecessarias antes de extrair
   const valorStr = resto.replace(/\bde\b/gi, '').replace(/\bhoje\b/gi, '').trim();
   const valor = extrairValor(valorStr);
   if (valor && valor > 0) return { tipo: 'valor', nome, valor };
-
   return null;
 }
 
-function parsearMensagem(texto) {
-  const matchNum = texto.match(/^(.+?)\s+(\d+)\s+(.+)$/);
-  if (matchNum) {
-    const qtd = parseInt(matchNum[2]);
-    const produto = identificarProduto(matchNum[3].trim());
-    if (produto && qtd > 0) return { nome: capitalizarNome(matchNum[1].trim()), quantidade: qtd, produto };
-  }
-  const palavras = texto.trim().split(/\s+/);
-  for (let i = 1; i < palavras.length; i++) {
+/**
+ * Extrai TODOS os pares (quantidade, produto) de um trecho de texto.
+ * Suporta:
+ *   "2 trufas 1 bolo"
+ *   "1 bolo mais uma trufa"
+ *   "uma trufa e tres bolos"
+ *   ", uma trufa e tres bolos"
+ */
+function extrairItensDaLinha(texto) {
+  // Remove separadores: virgula, "mais", "+", "e" (quando entre itens)
+  const limpo = norm(texto)
+    .replace(/,/g, ' ')
+    .replace(/\bmais\b/g, ' ')
+    .replace(/\+/g, ' ')
+    .replace(/\be\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const palavras = limpo.split(' ');
+  const itens = [];
+  let i = 0;
+  while (i < palavras.length) {
     const qtd = converterNumero(palavras[i]);
-    if (qtd === null) continue;
-    const nome = palavras.slice(0, i).join(' ');
-    const prodTexto = palavras.slice(i + 1).join(' ');
-    const produto = identificarProduto(prodTexto);
-    if (produto && nome) return { nome: capitalizarNome(nome), quantidade: qtd, produto };
+    if (qtd !== null) {
+      // Tenta produto nas proximas 1, 2 ou 3 palavras
+      let produto = null;
+      let avanco = 1;
+      for (let len = 3; len >= 1; len--) {
+        const trecho = palavras.slice(i + 1, i + 1 + len).join(' ');
+        produto = identificarProduto(trecho);
+        if (produto) { avanco = len + 1; break; }
+      }
+      if (produto) { itens.push({ quantidade: qtd, produto }); i += avanco; continue; }
+    }
+    i++;
   }
-  return null;
+  return itens;
+}
+
+/**
+ * Parseia uma linha completa, extraindo nome + multiplos itens.
+ * Exemplos:
+ *   "raylucas 2 trufas 1 bolo"
+ *   "raylucas 1 bolo mais uma trufa"
+ *   "raylucas, uma trufa e tres bolos"
+ */
+function parsearMensagem(texto) {
+  const t = norm(texto).replace(/,/g, ' ');
+  const palavras = t.split(/\s+/);
+
+  // Encontra a primeira palavra que seja um numero (inicio dos itens)
+  // O nome e tudo antes desse ponto
+  let inicioProdutos = -1;
+  for (let i = 1; i < palavras.length; i++) {
+    if (converterNumero(palavras[i]) !== null) {
+      // Verifica se ha produto nas proximas palavras
+      const trecho = palavras.slice(i + 1, i + 4).join(' ');
+      if (identificarProduto(trecho) !== null) {
+        inicioProdutos = i;
+        break;
+      }
+    }
+  }
+  if (inicioProdutos < 1) return null;
+
+  // Nome = palavras antes do primeiro numero
+  const nomeRaw = palavras.slice(0, inicioProdutos).join(' ');
+  // Remove palavras de ligacao no final do nome
+  const nome = nomeRaw.replace(/\b(mais|e|\+)\s*$/i, '').trim();
+  if (!nome) return null;
+
+  // Extrai todos os itens a partir do inicio
+  const restoOriginal = texto.split(/\s+/).slice(inicioProdutos).join(' ');
+  const itens = extrairItensDaLinha(restoOriginal);
+  if (!itens.length) return null;
+
+  return { nome: capitalizarNome(nome), itens };
 }
 
 function isRelatorio(texto) {
@@ -383,27 +442,44 @@ async function iniciarBot() {
           if (msg.message.conversation) texto = msg.message.conversation;
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
+
           if (isRelatorio(texto)) {
             await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioGeral() });
             continue;
           }
+
           const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
           const respostas = [];
+
           for (const linha of linhas) {
+            // 1. Tenta pagamento
             const pagamento = parsearPagamento(linha);
             if (pagamento) {
               const result = pagamento.tipo === 'valor'
                 ? await processarPagamentoValor(pagamento.nome, pagamento.valor)
                 : await processarPagamentoProduto(pagamento.nome, pagamento.qtd, pagamento.produto);
-              respostas.push(result.msg); continue;
+              respostas.push(result.msg);
+              continue;
             }
+
+            // 2. Tenta compra (suporta multiplos produtos)
             const parsed = parsearMensagem(linha);
             if (!parsed) continue;
-            const resultado = await registrarOuAcumular(parsed.nome, parsed.produto, parsed.quantidade);
-            if (resultado) {
-              respostas.push(`${parsed.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b'} *${parsed.nome}* \u2014 ${parsed.produto === 'bolo' ? 'Bolo' : 'Trufa'}\n   +${parsed.quantidade} agora | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+
+            const linhasResposta = [];
+            for (const item of parsed.itens) {
+              const resultado = await registrarOuAcumular(parsed.nome, item.produto, item.quantidade);
+              if (resultado) {
+                linhasResposta.push(
+                  `${item.produto === 'bolo' ? '\ud83c\udf82 Bolo' : '\ud83c\udf6b Trufa'}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`
+                );
+              }
+            }
+            if (linhasResposta.length) {
+              respostas.push(`*${capitalizarNome(parsed.nome)}*\n` + linhasResposta.join('\n'));
             }
           }
+
           if (respostas.length) await sock.sendMessage(msg.key.remoteJid, { text: respostas.join('\n\n').trim() });
         } catch(e) { console.error('Erro mensagem:', e.message); }
       }
