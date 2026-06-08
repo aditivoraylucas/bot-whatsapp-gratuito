@@ -23,9 +23,8 @@ const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
 const AUTH_DIR = 'auth_info';
 const PRECOS = { trufa: 5.0, bolo: 12.0 };
 
-// Sinonimos normalizados (sem acento, minusculo)
 const SINONIMOS = {
-  trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons', 'fruta', 'frutas'],
+  trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons'],
   bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote']
 };
 
@@ -39,7 +38,6 @@ const NUMEROS_EXTENSO = {
   'dezenove': 19, 'vinte': 20
 };
 
-// Normaliza: minusculo + sem acentos + trim
 function norm(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
@@ -59,15 +57,12 @@ function extrairValor(texto) {
   return parseFloat(m[1].replace(',', '.'));
 }
 
-// Identifica produto em um trecho de texto (testa do mais longo pro mais curto)
 function identificarProduto(texto) {
   const n = norm(texto);
-  // Testa frases compostas primeiro ("bolo de pote")
   for (const [produto, sins] of Object.entries(SINONIMOS))
     for (const sin of sins.sort((a, b) => b.length - a.length))
       if (n === norm(sin) || n.startsWith(norm(sin) + ' ') || n.endsWith(' ' + norm(sin)) || n.includes(' ' + norm(sin) + ' '))
         return produto;
-  // Fallback: contains
   for (const [produto, sins] of Object.entries(SINONIMOS))
     for (const sin of sins)
       if (n.includes(norm(sin))) return produto;
@@ -290,34 +285,15 @@ function parsearPagamento(texto) {
   return null;
 }
 
-/**
- * Extrai todos os pares (quantidade, produto) de um trecho.
- * Estrategia: percorre as palavras procurando [numero][produto].
- * Separadores "e", "mais", "+", "," sao ignorados.
- *
- * Exemplos:
- *   "1 bolo e 3 frutas"   -> [{1, bolo}, {3, trufa}]
- *   "2 trufas 1 bolo"     -> [{2, trufa}, {1, bolo}]
- *   "uma trufa e tres bolos" -> [{1, trufa}, {3, bolo}]
- */
 function extrairItens(texto) {
-  // Normaliza separadores
   const palavras = norm(texto)
-    .replace(/,/g, ' ')
-    .replace(/\bmais\b/g, ' ')
-    .replace(/\+/g, ' ')
-    .replace(/\be\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean);
-
+    .replace(/,/g, ' ').replace(/\bmais\b/g, ' ').replace(/\+/g, ' ').replace(/\be\b/g, ' ')
+    .replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   const itens = [];
   let i = 0;
   while (i < palavras.length) {
     const qtd = converterNumero(palavras[i]);
     if (qtd !== null) {
-      // Tenta combinar produto nas proximas ate 3 palavras (do maior pro menor)
       let produto = null;
       let avanco = 1;
       for (let len = Math.min(3, palavras.length - i - 1); len >= 1; len--) {
@@ -325,49 +301,31 @@ function extrairItens(texto) {
         const p = identificarProduto(trecho);
         if (p) { produto = p; avanco = len + 1; break; }
       }
-      if (produto) {
-        itens.push({ quantidade: qtd, produto });
-        i += avanco;
-        continue;
-      }
+      if (produto) { itens.push({ quantidade: qtd, produto }); i += avanco; continue; }
     }
     i++;
   }
   return itens;
 }
 
-/**
- * Parseia linha completa: nome + multiplos itens.
- * Retorna { nome, itens } ou null.
- */
 function parsearMensagem(texto) {
-  // Normaliza sem acentos para analise, mas preserva original para pegar nome
   const palavrasNorm = norm(texto).replace(/,/g, ' ').split(/\s+/).filter(Boolean);
   const palavrasOrig = texto.replace(/,/g, ' ').split(/\s+/).filter(Boolean);
-
-  // Encontra o primeiro indice onde temos [numero] seguido de [produto reconhecido]
   let inicioProdutos = -1;
   for (let i = 1; i < palavrasNorm.length; i++) {
     if (converterNumero(palavrasNorm[i]) === null) continue;
-    // Verifica se ha produto logo apos
     let temProduto = false;
     for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
       if (identificarProduto(palavrasNorm.slice(i + 1, i + 1 + len).join(' '))) { temProduto = true; break; }
     }
     if (temProduto) { inicioProdutos = i; break; }
   }
-
   if (inicioProdutos < 1) return null;
-
-  // Nome = palavras originais antes do primeiro numero
   const nomeRaw = palavrasOrig.slice(0, inicioProdutos).join(' ').replace(/\b(mais|e|\+)\s*$/i, '').trim();
   if (!nomeRaw) return null;
-
-  // Extrai itens do trecho apos o nome
   const trechoItens = palavrasNorm.slice(inicioProdutos).join(' ');
   const itens = extrairItens(trechoItens);
   if (!itens.length) return null;
-
   return { nome: capitalizarNome(nomeRaw), itens };
 }
 
@@ -443,10 +401,8 @@ async function iniciarBot() {
               respostas.push(result.msg);
               continue;
             }
-
             const parsed = parsearMensagem(linha);
             if (!parsed) continue;
-
             const linhasResposta = [];
             for (const item of parsed.itens) {
               const resultado = await registrarOuAcumular(parsed.nome, item.produto, item.quantidade);
@@ -456,9 +412,7 @@ async function iniciarBot() {
                 );
               }
             }
-            if (linhasResposta.length) {
-              respostas.push(`*${parsed.nome}*\n` + linhasResposta.join('\n'));
-            }
+            if (linhasResposta.length) respostas.push(`*${parsed.nome}*\n` + linhasResposta.join('\n'));
           }
 
           if (respostas.length) await sock.sendMessage(msg.key.remoteJid, { text: respostas.join('\n\n').trim() });
