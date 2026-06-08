@@ -15,7 +15,6 @@ const GRUPO_NOME = process.env.GRUPO_NOME || 'vendas';
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
-const MEU_NUMERO = (process.env.Meu_numero || '').replace(/[^0-9]/g, '');
 const PORT = process.env.PORT || 3000;
 const RENDER_API_KEY = process.env.RENDER_API_KEY || '';
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
@@ -23,11 +22,13 @@ const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
 const AUTH_DIR = 'auth_info';
 const PRECOS = { trufa: 5.0, bolo: 12.0 };
 
+// Sinonimos: numero vem ANTES do item (ex: "1 trufa", "3 bolos")
 const SINONIMOS = {
   trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons'],
   bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote']
 };
 
+// Numeros por extenso -> inteiro
 const NUMEROS_EXTENSO = {
   'um': 1, 'uma': 1, 'dois': 2, 'duas': 2,
   'tres': 3, 'quatro': 4, 'cinco': 5,
@@ -38,16 +39,31 @@ const NUMEROS_EXTENSO = {
   'dezenove': 19, 'vinte': 20
 };
 
+// Remove acentos, lowercase, trim
 function norm(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
 function mesmoNome(a, b) { return norm(a) === norm(b); }
 
-function converterNumero(texto) {
-  const n = norm(texto);
+// Retorna inteiro se a palavra for numero (digito ou extenso), senao null
+function toNumero(palavra) {
+  const n = norm(palavra);
   if (/^\d+$/.test(n)) return parseInt(n);
   return NUMEROS_EXTENSO[n] ?? null;
+}
+
+// Retorna o nome do produto se o trecho bater com algum sinonimo
+function toProduto(trecho) {
+  const n = norm(trecho);
+  for (const [produto, sins] of Object.entries(SINONIMOS))
+    for (const sin of [...sins].sort((a, b) => b.length - a.length))
+      if (n === norm(sin)) return produto;
+  // fallback: contains
+  for (const [produto, sins] of Object.entries(SINONIMOS))
+    for (const sin of sins)
+      if (n.includes(norm(sin))) return produto;
+  return null;
 }
 
 function extrairValor(texto) {
@@ -55,18 +71,6 @@ function extrairValor(texto) {
   const m = t.match(/(\d+[,.]?\d*)/);
   if (!m) return null;
   return parseFloat(m[1].replace(',', '.'));
-}
-
-function identificarProduto(texto) {
-  const n = norm(texto);
-  for (const [produto, sins] of Object.entries(SINONIMOS))
-    for (const sin of sins.sort((a, b) => b.length - a.length))
-      if (n === norm(sin) || n.startsWith(norm(sin) + ' ') || n.endsWith(' ' + norm(sin)) || n.includes(' ' + norm(sin) + ' '))
-        return produto;
-  for (const [produto, sins] of Object.entries(SINONIMOS))
-    for (const sin of sins)
-      if (n.includes(norm(sin))) return produto;
-  return null;
 }
 
 let botConectado = false;
@@ -141,6 +145,10 @@ async function getSheetHistorico() {
   return sheet;
 }
 function agora() { return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
+
+function capitalizarNome(nome) {
+  return nome.trim().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+}
 
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
@@ -260,73 +268,92 @@ async function gerarRelatorioGeral() {
   } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
 }
 
-function capitalizarNome(nome) {
-  return nome.trim().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-}
+/**
+ * REGRA PRINCIPAL:
+ * Numero (digito ou extenso) sempre vem ANTES do item.
+ * Percorre as palavras: ao encontrar um numero, as proximas ate 3 palavras
+ * formam o nome do produto.
+ * Tudo que vem antes do primeiro par [numero+produto] e o nome do cliente.
+ *
+ * Ex: "raylucas 1 trufa 3 bolos"
+ *   -> nome = "raylucas"
+ *   -> itens = [{1, trufa}, {3, bolo}]
+ */
+function parsearLinha(linha) {
+  // Normaliza separadores mantendo palavras originais para capturar nome
+  const limpa = linha.replace(/,/g, ' ').replace(/\bmais\b/gi, ' ').replace(/\+/g, ' ').replace(/\be\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  const palavras = limpa.split(' ').filter(Boolean);
+  const palavrasNorm = palavras.map(norm);
 
-function parsearPagamento(texto) {
-  const t = norm(texto);
-  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t)) return null;
-  const matchNome = texto.match(/^(.+?)\s+(?:pagou|pix|transferiu|depositou|mandou|enviou)/i);
-  if (!matchNome) return null;
-  const nome = matchNome[1].trim();
-  const resto = texto.slice(matchNome[0].length).trim();
-  const palavras = resto.split(/\s+/);
-  for (let i = 0; i < palavras.length; i++) {
-    const qtd = converterNumero(palavras[i]);
-    if (qtd === null) continue;
-    const prodTexto = palavras.slice(i + 1).join(' ');
-    const produto = identificarProduto(prodTexto);
-    if (produto) return { tipo: 'produto', nome, qtd, produto };
+  // Acha o indice do primeiro numero seguido de produto
+  let inicioPar = -1;
+  for (let i = 0; i < palavrasNorm.length - 1; i++) {
+    if (toNumero(palavrasNorm[i]) === null) continue;
+    // Testa se alguma combinacao de 1-3 palavras seguintes e um produto
+    for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
+      if (toProduto(palavrasNorm.slice(i + 1, i + 1 + len).join(' '))) {
+        inicioPar = i;
+        break;
+      }
+    }
+    if (inicioPar >= 0) break;
   }
-  const valorStr = resto.replace(/\bde\b/gi, '').replace(/\bhoje\b/gi, '').trim();
-  const valor = extrairValor(valorStr);
-  if (valor && valor > 0) return { tipo: 'valor', nome, valor };
-  return null;
-}
 
-function extrairItens(texto) {
-  const palavras = norm(texto)
-    .replace(/,/g, ' ').replace(/\bmais\b/g, ' ').replace(/\+/g, ' ').replace(/\be\b/g, ' ')
-    .replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (inicioPar < 1) return null; // sem nome ou sem par valido
+
+  // Nome = tudo antes do primeiro par
+  const nomeRaw = palavras.slice(0, inicioPar).join(' ');
+  if (!nomeRaw.trim()) return null;
+
+  // Extrai todos os pares [numero + produto] a partir do inicioPar
   const itens = [];
-  let i = 0;
-  while (i < palavras.length) {
-    const qtd = converterNumero(palavras[i]);
-    if (qtd !== null) {
+  let i = inicioPar;
+  while (i < palavrasNorm.length) {
+    const qtd = toNumero(palavrasNorm[i]);
+    if (qtd !== null && i + 1 < palavrasNorm.length) {
       let produto = null;
       let avanco = 1;
-      for (let len = Math.min(3, palavras.length - i - 1); len >= 1; len--) {
-        const trecho = palavras.slice(i + 1, i + 1 + len).join(' ');
-        const p = identificarProduto(trecho);
+      // Tenta do maior trecho pro menor (suporte a "bolo de pote")
+      for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
+        const trecho = palavrasNorm.slice(i + 1, i + 1 + len).join(' ');
+        const p = toProduto(trecho);
         if (p) { produto = p; avanco = len + 1; break; }
       }
-      if (produto) { itens.push({ quantidade: qtd, produto }); i += avanco; continue; }
+      if (produto) {
+        itens.push({ quantidade: qtd, produto });
+        i += avanco;
+        continue;
+      }
     }
     i++;
   }
-  return itens;
-}
 
-function parsearMensagem(texto) {
-  const palavrasNorm = norm(texto).replace(/,/g, ' ').split(/\s+/).filter(Boolean);
-  const palavrasOrig = texto.replace(/,/g, ' ').split(/\s+/).filter(Boolean);
-  let inicioProdutos = -1;
-  for (let i = 1; i < palavrasNorm.length; i++) {
-    if (converterNumero(palavrasNorm[i]) === null) continue;
-    let temProduto = false;
-    for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
-      if (identificarProduto(palavrasNorm.slice(i + 1, i + 1 + len).join(' '))) { temProduto = true; break; }
-    }
-    if (temProduto) { inicioProdutos = i; break; }
-  }
-  if (inicioProdutos < 1) return null;
-  const nomeRaw = palavrasOrig.slice(0, inicioProdutos).join(' ').replace(/\b(mais|e|\+)\s*$/i, '').trim();
-  if (!nomeRaw) return null;
-  const trechoItens = palavrasNorm.slice(inicioProdutos).join(' ');
-  const itens = extrairItens(trechoItens);
   if (!itens.length) return null;
   return { nome: capitalizarNome(nomeRaw), itens };
+}
+
+function parsearPagamento(linha) {
+  const t = norm(linha);
+  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t)) return null;
+  const matchNome = linha.match(/^(.+?)\s+(?:pagou|pix|transferiu|depositou|mandou|enviou)/i);
+  if (!matchNome) return null;
+  const nome = matchNome[1].trim();
+  const resto = linha.slice(matchNome[0].length).trim();
+  // Tenta pagar produto: "pagou 2 trufas"
+  const palavras = resto.split(/\s+/);
+  for (let i = 0; i < palavras.length; i++) {
+    const qtd = toNumero(norm(palavras[i]));
+    if (qtd === null) continue;
+    for (let len = Math.min(3, palavras.length - i - 1); len >= 1; len--) {
+      const trecho = palavras.slice(i + 1, i + 1 + len).map(norm).join(' ');
+      const produto = toProduto(trecho);
+      if (produto) return { tipo: 'produto', nome, qtd, produto };
+    }
+  }
+  // Tenta pagar valor: "pagou 10", "pix de 10", "pix 10 reais"
+  const valor = extrairValor(resto);
+  if (valor && valor > 0) return { tipo: 'valor', nome, valor };
+  return null;
 }
 
 function isRelatorio(texto) {
@@ -393,6 +420,7 @@ async function iniciarBot() {
           const respostas = [];
 
           for (const linha of linhas) {
+            // 1. Pagamento?
             const pagamento = parsearPagamento(linha);
             if (pagamento) {
               const result = pagamento.tipo === 'valor'
@@ -401,7 +429,8 @@ async function iniciarBot() {
               respostas.push(result.msg);
               continue;
             }
-            const parsed = parsearMensagem(linha);
+            // 2. Compra: [nome] [num item] [num item] ...
+            const parsed = parsearLinha(linha);
             if (!parsed) continue;
             const linhasResposta = [];
             for (const item of parsed.itens) {
