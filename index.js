@@ -21,7 +21,6 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY || '';
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
 
 const AUTH_DIR = 'auth_info';
-
 const PRECOS = { trufa: 5.0, bombom: 5.0, bolo: 12.0 };
 const SINONIMOS = {
   trufa: ['trufa', 'trufas', 'trufinha', 'bombom', 'bombons'],
@@ -39,10 +38,7 @@ function restaurarSessao() {
     fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
     console.log('Sessao restaurada do CREDS_JSON');
     return true;
-  } catch (e) {
-    console.error('Erro ao restaurar sessao:', e.message);
-    return false;
-  }
+  } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
 }
 
 async function salvarSessaoNoRender() {
@@ -77,32 +73,52 @@ http.createServer(async (req, res) => {
       res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
         <h1>\ud83d\udcf1 Escanear QR Code</h1>
         <p>WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
-        <p>Aponte a c\u00e2mera do WhatsApp para o QR Code abaixo:</p>
         ${qrImage ? `<img src="${qrImage}" style="width:300px;height:300px;border:4px solid #25D366;border-radius:10px" />` : '<p>Gerando QR...</p>'}
-        <p style="color:#888">O QR Code atualiza automaticamente a cada 25 segundos</p>
         <script>setTimeout(()=>location.reload(),25000)</script>
       </body></html>`);
     } else {
-      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u23f3 Iniciando bot...</h1><p>Aguarde e atualize em alguns segundos.</p><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
+      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u23f3 Iniciando bot...</h1><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
     }
-  } catch(e) {
-    res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');
-  }
+  } catch(e) { res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>'); }
 }).listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
 function getAuth() {
   return new JWT({ email: GOOGLE_SERVICE_ACCOUNT_EMAIL, key: GOOGLE_PRIVATE_KEY, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
 }
 
-async function getSheet() {
+async function getDoc() {
   const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
   await doc.loadInfo();
+  return doc;
+}
+
+async function getSheetSaldo() {
+  const doc = await getDoc();
   return doc.sheetsByIndex[0];
+}
+
+async function getSheetHistorico() {
+  const doc = await getDoc();
+  // Usa segunda aba, cria se nao existir
+  if (doc.sheetCount < 2) {
+    const sheet = await doc.addSheet({ title: 'Historico', headerValues: ['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor'] });
+    return sheet;
+  }
+  const sheet = doc.sheetsByIndex[1];
+  // Garante cabecalho
+  try { await sheet.loadHeaderRow(); } catch(e) {
+    await sheet.setHeaderRow(['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor']);
+  }
+  return sheet;
+}
+
+function agora() {
+  return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 }
 
 async function registrarOuAcumular(cliente, produto, quantidade) {
   try {
-    const sheet = await getSheet();
+    const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
     const nomeNorm = cliente.toLowerCase().trim();
     const prodNorm = produto.toLowerCase().trim();
@@ -110,19 +126,20 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
       (r.get('Cliente') || '').toLowerCase().trim() === nomeNorm &&
       (r.get('Produto') || '').toLowerCase().trim() === prodNorm
     );
-    const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const total = (PRECOS[produto] || 0) * quantidade;
     if (existente) {
-      const qtdAtual = parseInt(existente.get('Quantidade') || '0');
-      const novaQtd = qtdAtual + quantidade;
+      const novaQtd = parseInt(existente.get('Quantidade') || '0') + quantidade;
       const novoTotal = (PRECOS[produto] || 0) * novaQtd;
-      existente.set('Quantidade', novaQtd);
-      existente.set('Total', novoTotal.toFixed(2));
-      existente.set('UltimaCompra', agora);
+      existente.set('Quantidade', novaQtd); existente.set('Total', novoTotal.toFixed(2)); existente.set('UltimaCompra', agora());
       await existente.save();
+      // Historico
+      const hist = await getSheetHistorico();
+      await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
       return { totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
     } else {
-      const total = (PRECOS[produto] || 0) * quantidade;
-      await sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: total.toFixed(2), UltimaCompra: agora });
+      await sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: total.toFixed(2), UltimaCompra: agora() });
+      const hist = await getSheetHistorico();
+      await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
       return { totalAcumulado: total, qtdAcumulada: quantidade };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
@@ -130,7 +147,7 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
 
 async function processarPagamentoProduto(cliente, quantidade, produto) {
   try {
-    const sheet = await getSheet();
+    const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
     const row = rows.find(r =>
       (r.get('Cliente') || '').toLowerCase().trim() === cliente.toLowerCase().trim() &&
@@ -138,25 +155,30 @@ async function processarPagamentoProduto(cliente, quantidade, produto) {
     );
     if (!row) return { ok: false, msg: `Nenhuma d\u00edvida de ${cliente} com ${produto} encontrada.` };
     const qtdAtual = parseInt(row.get('Quantidade') || '0');
-    const novaQtd = Math.max(0, qtdAtual - quantidade);
-    const pago = (PRECOS[produto] || 0) * Math.min(quantidade, qtdAtual);
+    const qtdPaga = Math.min(quantidade, qtdAtual);
+    const novaQtd = qtdAtual - qtdPaga;
+    const pago = (PRECOS[produto] || 0) * qtdPaga;
+    const hist = await getSheetHistorico();
+    await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) });
     if (novaQtd === 0) {
       await row.delete();
       return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` };
     }
     const novoTotal = (PRECOS[produto] || 0) * novaQtd;
     row.set('Quantidade', novaQtd); row.set('Total', novoTotal.toFixed(2)); await row.save();
-    return { ok: true, msg: `\u2705 *${cliente}* pagou ${Math.min(quantidade, qtdAtual)} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}` };
+    return { ok: true, msg: `\u2705 *${cliente}* pagou ${qtdPaga} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}` };
   } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
 async function processarPagamentoValor(cliente, valorPago) {
   try {
-    const sheet = await getSheet();
+    const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
     const rowsCliente = rows.filter(r => (r.get('Cliente') || '').toLowerCase().trim() === cliente.toLowerCase().trim());
     if (!rowsCliente.length) return { ok: false, msg: `Nenhuma d\u00edvida encontrada para ${cliente}.` };
     let totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
+    const hist = await getSheetHistorico();
+    await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2) });
     if (valorPago >= totalDevido) {
       for (const r of rowsCliente) await r.delete();
       return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.` };
@@ -173,6 +195,87 @@ async function processarPagamentoValor(cliente, valorPago) {
   } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
+async function gerarRelatorioGeral() {
+  try {
+    const doc = await getDoc();
+    const sheetSaldo = doc.sheetsByIndex[0];
+    const rowsSaldo = await sheetSaldo.getRows();
+
+    // Historico
+    let rowsHist = [];
+    if (doc.sheetCount >= 2) {
+      const sheetHist = doc.sheetsByIndex[1];
+      try { await sheetHist.loadHeaderRow(); rowsHist = await sheetHist.getRows(); } catch(e) {}
+    }
+
+    if (!rowsSaldo.length && !rowsHist.length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+
+    // Agrupa historico por cliente
+    const hist = {};
+    for (const row of rowsHist) {
+      const nome = (row.get('Cliente') || '').trim();
+      const tipo = (row.get('Tipo') || '').trim();
+      const valor = parseFloat(row.get('Valor') || '0');
+      const qtd = row.get('Quantidade');
+      const produto = (row.get('Produto') || '').trim();
+      if (!nome) continue;
+      if (!hist[nome]) hist[nome] = { totalComprado: 0, totalPago: 0, itensComprados: {} };
+      if (tipo === 'Compra') {
+        hist[nome].totalComprado += valor;
+        if (!hist[nome].itensComprados[produto]) hist[nome].itensComprados[produto] = 0;
+        hist[nome].itensComprados[produto] += parseInt(qtd) || 0;
+      } else if (tipo === 'Pagamento') {
+        hist[nome].totalPago += valor;
+      }
+    }
+
+    // Saldo atual por cliente
+    const saldos = {};
+    for (const row of rowsSaldo) {
+      const nome = (row.get('Cliente') || '').trim();
+      const total = parseFloat(row.get('Total') || '0');
+      if (!nome) continue;
+      if (!saldos[nome]) saldos[nome] = 0;
+      saldos[nome] += total;
+    }
+
+    const todosClientes = new Set([...Object.keys(hist), ...Object.keys(saldos)]);
+    let resposta = '\ud83d\udcca *Relat\u00f3rio Geral*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let totalGeral = 0;
+
+    for (const nome of todosClientes) {
+      const h = hist[nome] || { totalComprado: 0, totalPago: 0, itensComprados: {} };
+      const saldo = saldos[nome] || 0;
+      resposta += `\n\ud83d\udc64 *${nome}*\n`;
+      if (Object.keys(h.itensComprados).length) {
+        for (const [prod, qtd] of Object.entries(h.itensComprados)) {
+          const emoji = prod === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+          resposta += `   ${emoji} ${prod === 'bolo' ? 'Bolo' : 'Trufa'}: ${qtd} comprados\n`;
+        }
+      }
+      resposta += `   \ud83d\uded2 Total comprado: R$ ${h.totalComprado.toFixed(2)}\n`;
+      if (h.totalPago > 0) resposta += `   \u2705 Total pago: R$ ${h.totalPago.toFixed(2)}\n`;
+      resposta += `   \ud83d\udcb0 *Saldo devedor: R$ ${saldo.toFixed(2)}*\n`;
+      totalGeral += saldo;
+    }
+
+    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL GERAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    return resposta;
+  } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
+}
+
+function identificarProduto(texto) {
+  const lower = (texto || '').toLowerCase();
+  for (const [produto, sins] of Object.entries(SINONIMOS))
+    for (const sin of sins)
+      if (lower.includes(sin)) return produto;
+  return null;
+}
+
+function capitalizarNome(nome) {
+  return nome.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+}
+
 function parsearPagamento(texto) {
   if (!texto.toLowerCase().includes('pagou')) return null;
   const porValor = texto.match(/^(.+?)\s+pagou\s+(\d+[.,]?\d*)\s*(reais|r\$)?$/i);
@@ -185,50 +288,6 @@ function parsearPagamento(texto) {
   return null;
 }
 
-function capitalizarNome(nome) {
-  return nome.split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-}
-
-async function gerarRelatorio() {
-  try {
-    const sheet = await getSheet();
-    const rows = await sheet.getRows();
-    if (!rows.length) return '\ud83d\udcca Nenhuma venda registrada ainda.';
-    const clientes = {};
-    for (const row of rows) {
-      const nome = (row.get('Cliente') || '').trim();
-      const produto = (row.get('Produto') || '').trim();
-      const qtd = parseInt(row.get('Quantidade') || '0');
-      const total = parseFloat(row.get('Total') || '0');
-      if (!nome) continue;
-      if (!clientes[nome]) clientes[nome] = [];
-      clientes[nome].push({ produto, qtd, total });
-    }
-    let resposta = '\ud83d\udcca *Relat\u00f3rio de Saldos*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
-    let totalGeral = 0;
-    for (const [nome, itens] of Object.entries(clientes)) {
-      let totalCliente = 0;
-      resposta += `\n\ud83d\udc64 *${nome}*\n`;
-      for (const { produto, qtd, total } of itens) {
-        resposta += `   ${produto === 'bolo' ? '\ud83c\udf82 Bolo' : '\ud83c\udf6b Trufa'}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
-        totalCliente += total;
-      }
-      resposta += `   \ud83d\udcb0 Deve: *R$ ${totalCliente.toFixed(2)}*\n`;
-      totalGeral += totalCliente;
-    }
-    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL GERAL: R$ ${totalGeral.toFixed(2)}*`;
-    return resposta;
-  } catch (err) { return '\u274c Erro ao gerar relat\u00f3rio.'; }
-}
-
-function identificarProduto(texto) {
-  const lower = (texto || '').toLowerCase();
-  for (const [produto, sins] of Object.entries(SINONIMOS))
-    for (const sin of sins)
-      if (lower.includes(sin)) return produto;
-  return null;
-}
-
 function parsearMensagem(texto) {
   const match = texto.match(/^(.+?)\s+(\d+)\s+(.+)$/);
   if (!match) return null;
@@ -236,6 +295,11 @@ function parsearMensagem(texto) {
   const produto = identificarProduto(match[3].trim());
   if (!produto || qtd <= 0) return null;
   return { nome: capitalizarNome(match[1].trim()), quantidade: qtd, produto };
+}
+
+function isRelatorio(texto) {
+  const t = texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return t.includes('relatorio') || t.includes('saldo') || t.includes('me de o relatorio') || t.includes('relatorio geral');
 }
 
 let reconectando = false;
@@ -251,26 +315,16 @@ async function iniciarBot() {
     const sock = makeWASocket({
       version,
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-      printQRInTerminal: false,
-      logger,
+      printQRInTerminal: false, logger,
       browser: Browsers.ubuntu('Chrome'),
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 15000,
-      retryRequestDelayMs: 3000,
-      maxMsgRetryCount: 3
+      connectTimeoutMs: 60000, defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 15000, retryRequestDelayMs: 3000, maxMsgRetryCount: 3
     });
 
-    sock.ev.on('creds.update', async () => {
-      await saveCreds();
-      await salvarSessaoNoRender();
-    });
+    sock.ev.on('creds.update', async () => { await saveCreds(); await salvarSessaoNoRender(); });
 
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-      if (qr) {
-        qrCodeData = qr;
-        console.log('QR Code gerado — acesse o link para escanear');
-      }
+      if (qr) { qrCodeData = qr; console.log('QR Code gerado'); }
       if (connection === 'close') {
         botConectado = false; reconectando = false;
         const code = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
@@ -297,11 +351,12 @@ async function iniciarBot() {
           if (msg.message.conversation) texto = msg.message.conversation;
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
-          const textoNorm = texto.trim().toLowerCase();
-          if (['relatorio', 'relat\u00f3rio', 'saldo', 'saldos'].includes(textoNorm)) {
-            await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorio() });
+
+          if (isRelatorio(texto)) {
+            await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioGeral() });
             continue;
           }
+
           const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
           const respostas = [];
           for (const linha of linhas) {
