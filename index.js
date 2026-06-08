@@ -22,13 +22,11 @@ const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
 const AUTH_DIR = 'auth_info';
 const PRECOS = { trufa: 5.0, bolo: 12.0 };
 
-// Sinonimos: numero vem ANTES do item (ex: "1 trufa", "3 bolos")
 const SINONIMOS = {
   trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons'],
   bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote']
 };
 
-// Numeros por extenso -> inteiro
 const NUMEROS_EXTENSO = {
   'um': 1, 'uma': 1, 'dois': 2, 'duas': 2,
   'tres': 3, 'quatro': 4, 'cinco': 5,
@@ -39,30 +37,25 @@ const NUMEROS_EXTENSO = {
   'dezenove': 19, 'vinte': 20
 };
 
-// Remove acentos, lowercase, trim
 function norm(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
 function mesmoNome(a, b) { return norm(a) === norm(b); }
 
-// Retorna inteiro se a palavra for numero (digito ou extenso), senao null
 function toNumero(palavra) {
   const n = norm(palavra);
   if (/^\d+$/.test(n)) return parseInt(n);
   return NUMEROS_EXTENSO[n] ?? null;
 }
 
-// Retorna o nome do produto se o trecho bater com algum sinonimo
+// CORRESPONDENCIA EXATA apenas — sem fallback por includes
+// Isso evita que "bolo 3 trufas" seja reconhecido como produto "bolo"
 function toProduto(trecho) {
   const n = norm(trecho);
   for (const [produto, sins] of Object.entries(SINONIMOS))
-    for (const sin of [...sins].sort((a, b) => b.length - a.length))
-      if (n === norm(sin)) return produto;
-  // fallback: contains
-  for (const [produto, sins] of Object.entries(SINONIMOS))
     for (const sin of sins)
-      if (n.includes(norm(sin))) return produto;
+      if (n === norm(sin)) return produto;
   return null;
 }
 
@@ -269,61 +262,61 @@ async function gerarRelatorioGeral() {
 }
 
 /**
- * REGRA PRINCIPAL:
- * Numero (digito ou extenso) sempre vem ANTES do item.
- * Percorre as palavras: ao encontrar um numero, as proximas ate 3 palavras
- * formam o nome do produto.
- * Tudo que vem antes do primeiro par [numero+produto] e o nome do cliente.
+ * REGRA: numero SEMPRE antes do item.
+ * Varredura palavra a palavra:
+ *   - Encontrou numero? Testa proxima(s) palavra(s) com match EXATO.
+ *   - Se bater => par valido, avanca.
+ *   - Se nao bater => ignora e avanca 1.
+ * Tudo antes do primeiro par valido = nome do cliente.
  *
- * Ex: "raylucas 1 trufa 3 bolos"
- *   -> nome = "raylucas"
- *   -> itens = [{1, trufa}, {3, bolo}]
+ * Exemplos:
+ *   "julia 1 bolo 3 trufas"  => julia | [{1,bolo},{3,trufa}]
+ *   "julia um bolo e tres trufas" => julia | [{1,bolo},{3,trufa}]
+ *   "julia 2 trufas 1 bolo"  => julia | [{2,trufa},{1,bolo}]
  */
 function parsearLinha(linha) {
-  // Normaliza separadores mantendo palavras originais para capturar nome
-  const limpa = linha.replace(/,/g, ' ').replace(/\bmais\b/gi, ' ').replace(/\+/g, ' ').replace(/\be\b/gi, ' ').replace(/\s+/g, ' ').trim();
-  const palavras = limpa.split(' ').filter(Boolean);
-  const palavrasNorm = palavras.map(norm);
+  // Remove conectores e normaliza espacos, mas mantem palavras originais para nome
+  const limpa = linha
+    .replace(/,/g, ' ')
+    .replace(/\bmais\b/gi, ' ')
+    .replace(/\+/g, ' ')
+    .replace(/\be\b/gi, ' ')
+    .replace(/\bde\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  // Acha o indice do primeiro numero seguido de produto
+  const palavrasOrig = limpa.split(' ').filter(Boolean);
+  const palavrasNorm = palavrasOrig.map(norm);
+  const n = palavrasNorm.length;
+
+  // Encontra indice do primeiro numero que tem produto logo apos (1 ou 2 palavras)
   let inicioPar = -1;
-  for (let i = 0; i < palavrasNorm.length - 1; i++) {
+  for (let i = 0; i < n - 1; i++) {
     if (toNumero(palavrasNorm[i]) === null) continue;
-    // Testa se alguma combinacao de 1-3 palavras seguintes e um produto
-    for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
-      if (toProduto(palavrasNorm.slice(i + 1, i + 1 + len).join(' '))) {
-        inicioPar = i;
-        break;
-      }
-    }
-    if (inicioPar >= 0) break;
+    // Testa trecho de 2 palavras primeiro ("bolo pote"), depois 1 palavra
+    const ok2 = i + 2 < n && toProduto(palavrasNorm[i+1] + ' ' + palavrasNorm[i+2]);
+    const ok1 = toProduto(palavrasNorm[i+1]);
+    if (ok2 || ok1) { inicioPar = i; break; }
   }
 
-  if (inicioPar < 1) return null; // sem nome ou sem par valido
+  if (inicioPar < 1) return null;
 
-  // Nome = tudo antes do primeiro par
-  const nomeRaw = palavras.slice(0, inicioPar).join(' ');
-  if (!nomeRaw.trim()) return null;
+  const nomeRaw = palavrasOrig.slice(0, inicioPar).join(' ').trim();
+  if (!nomeRaw) return null;
 
-  // Extrai todos os pares [numero + produto] a partir do inicioPar
+  // Coleta todos os pares [numero + produto] a partir do inicioPar
   const itens = [];
   let i = inicioPar;
-  while (i < palavrasNorm.length) {
+  while (i < n) {
     const qtd = toNumero(palavrasNorm[i]);
-    if (qtd !== null && i + 1 < palavrasNorm.length) {
-      let produto = null;
-      let avanco = 1;
-      // Tenta do maior trecho pro menor (suporte a "bolo de pote")
-      for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
-        const trecho = palavrasNorm.slice(i + 1, i + 1 + len).join(' ');
-        const p = toProduto(trecho);
-        if (p) { produto = p; avanco = len + 1; break; }
+    if (qtd !== null && i + 1 < n) {
+      // Tenta 2 palavras ("bolo de pote") depois 1
+      if (i + 2 < n) {
+        const p2 = toProduto(palavrasNorm[i+1] + ' ' + palavrasNorm[i+2]);
+        if (p2) { itens.push({ quantidade: qtd, produto: p2 }); i += 3; continue; }
       }
-      if (produto) {
-        itens.push({ quantidade: qtd, produto });
-        i += avanco;
-        continue;
-      }
+      const p1 = toProduto(palavrasNorm[i+1]);
+      if (p1) { itens.push({ quantidade: qtd, produto: p1 }); i += 2; continue; }
     }
     i++;
   }
@@ -339,18 +332,19 @@ function parsearPagamento(linha) {
   if (!matchNome) return null;
   const nome = matchNome[1].trim();
   const resto = linha.slice(matchNome[0].length).trim();
-  // Tenta pagar produto: "pagou 2 trufas"
-  const palavras = resto.split(/\s+/);
+  const palavras = norm(resto).replace(/\bde\b/g, ' ').split(/\s+/).filter(Boolean);
   for (let i = 0; i < palavras.length; i++) {
-    const qtd = toNumero(norm(palavras[i]));
+    const qtd = toNumero(palavras[i]);
     if (qtd === null) continue;
-    for (let len = Math.min(3, palavras.length - i - 1); len >= 1; len--) {
-      const trecho = palavras.slice(i + 1, i + 1 + len).map(norm).join(' ');
-      const produto = toProduto(trecho);
-      if (produto) return { tipo: 'produto', nome, qtd, produto };
+    if (i + 2 < palavras.length) {
+      const p2 = toProduto(palavras[i+1] + ' ' + palavras[i+2]);
+      if (p2) return { tipo: 'produto', nome, qtd, produto: p2 };
+    }
+    if (i + 1 < palavras.length) {
+      const p1 = toProduto(palavras[i+1]);
+      if (p1) return { tipo: 'produto', nome, qtd, produto: p1 };
     }
   }
-  // Tenta pagar valor: "pagou 10", "pix de 10", "pix 10 reais"
   const valor = extrairValor(resto);
   if (valor && valor > 0) return { tipo: 'valor', nome, valor };
   return null;
@@ -420,7 +414,6 @@ async function iniciarBot() {
           const respostas = [];
 
           for (const linha of linhas) {
-            // 1. Pagamento?
             const pagamento = parsearPagamento(linha);
             if (pagamento) {
               const result = pagamento.tipo === 'valor'
@@ -429,7 +422,6 @@ async function iniciarBot() {
               respostas.push(result.msg);
               continue;
             }
-            // 2. Compra: [nome] [num item] [num item] ...
             const parsed = parsearLinha(linha);
             if (!parsed) continue;
             const linhasResposta = [];
