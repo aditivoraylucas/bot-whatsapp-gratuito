@@ -27,6 +27,39 @@ const SINONIMOS = {
   bolo: ['bolo', 'bolinho', 'bolo de pote', 'bolo pote']
 };
 
+// Numeros por extenso em portugues
+const NUMEROS_EXTENSO = {
+  'um': 1, 'uma': 1,
+  'dois': 2, 'duas': 2,
+  'tres': 3, 'tr\u00eas': 3,
+  'quatro': 4,
+  'cinco': 5,
+  'seis': 6,
+  'sete': 7,
+  'oito': 8,
+  'nove': 9,
+  'dez': 10,
+  'onze': 11,
+  'doze': 12,
+  'treze': 13,
+  'quatorze': 14, 'catorze': 14,
+  'quinze': 15,
+  'dezesseis': 16,
+  'dezessete': 17,
+  'dezoito': 18,
+  'dezenove': 19,
+  'vinte': 20
+};
+
+function converterNumero(texto) {
+  const lower = texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  // Numero numerico
+  if (/^\d+$/.test(lower)) return parseInt(lower);
+  // Numero por extenso
+  if (NUMEROS_EXTENSO[lower] !== undefined) return NUMEROS_EXTENSO[lower];
+  return null;
+}
+
 let botConectado = false;
 let qrCodeData = null;
 
@@ -99,13 +132,10 @@ async function getSheetSaldo() {
 
 async function getSheetHistorico() {
   const doc = await getDoc();
-  // Usa segunda aba, cria se nao existir
   if (doc.sheetCount < 2) {
-    const sheet = await doc.addSheet({ title: 'Historico', headerValues: ['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor'] });
-    return sheet;
+    return await doc.addSheet({ title: 'Historico', headerValues: ['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor'] });
   }
   const sheet = doc.sheetsByIndex[1];
-  // Garante cabecalho
   try { await sheet.loadHeaderRow(); } catch(e) {
     await sheet.setHeaderRow(['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor']);
   }
@@ -132,7 +162,6 @@ async function registrarOuAcumular(cliente, produto, quantidade) {
       const novoTotal = (PRECOS[produto] || 0) * novaQtd;
       existente.set('Quantidade', novaQtd); existente.set('Total', novoTotal.toFixed(2)); existente.set('UltimaCompra', agora());
       await existente.save();
-      // Historico
       const hist = await getSheetHistorico();
       await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
       return { totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
@@ -160,10 +189,7 @@ async function processarPagamentoProduto(cliente, quantidade, produto) {
     const pago = (PRECOS[produto] || 0) * qtdPaga;
     const hist = await getSheetHistorico();
     await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) });
-    if (novaQtd === 0) {
-      await row.delete();
-      return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` };
-    }
+    if (novaQtd === 0) { await row.delete(); return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` }; }
     const novoTotal = (PRECOS[produto] || 0) * novaQtd;
     row.set('Quantidade', novaQtd); row.set('Total', novoTotal.toFixed(2)); await row.save();
     return { ok: true, msg: `\u2705 *${cliente}* pagou ${qtdPaga} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}` };
@@ -200,17 +226,12 @@ async function gerarRelatorioGeral() {
     const doc = await getDoc();
     const sheetSaldo = doc.sheetsByIndex[0];
     const rowsSaldo = await sheetSaldo.getRows();
-
-    // Historico
     let rowsHist = [];
     if (doc.sheetCount >= 2) {
       const sheetHist = doc.sheetsByIndex[1];
       try { await sheetHist.loadHeaderRow(); rowsHist = await sheetHist.getRows(); } catch(e) {}
     }
-
     if (!rowsSaldo.length && !rowsHist.length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
-
-    // Agrupa historico por cliente
     const hist = {};
     for (const row of rowsHist) {
       const nome = (row.get('Cliente') || '').trim();
@@ -224,12 +245,8 @@ async function gerarRelatorioGeral() {
         hist[nome].totalComprado += valor;
         if (!hist[nome].itensComprados[produto]) hist[nome].itensComprados[produto] = 0;
         hist[nome].itensComprados[produto] += parseInt(qtd) || 0;
-      } else if (tipo === 'Pagamento') {
-        hist[nome].totalPago += valor;
-      }
+      } else if (tipo === 'Pagamento') { hist[nome].totalPago += valor; }
     }
-
-    // Saldo atual por cliente
     const saldos = {};
     for (const row of rowsSaldo) {
       const nome = (row.get('Cliente') || '').trim();
@@ -238,27 +255,21 @@ async function gerarRelatorioGeral() {
       if (!saldos[nome]) saldos[nome] = 0;
       saldos[nome] += total;
     }
-
     const todosClientes = new Set([...Object.keys(hist), ...Object.keys(saldos)]);
     let resposta = '\ud83d\udcca *Relat\u00f3rio Geral*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral = 0;
-
     for (const nome of todosClientes) {
       const h = hist[nome] || { totalComprado: 0, totalPago: 0, itensComprados: {} };
       const saldo = saldos[nome] || 0;
       resposta += `\n\ud83d\udc64 *${nome}*\n`;
-      if (Object.keys(h.itensComprados).length) {
-        for (const [prod, qtd] of Object.entries(h.itensComprados)) {
-          const emoji = prod === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
-          resposta += `   ${emoji} ${prod === 'bolo' ? 'Bolo' : 'Trufa'}: ${qtd} comprados\n`;
-        }
+      for (const [prod, qtd] of Object.entries(h.itensComprados)) {
+        resposta += `   ${prod === 'bolo' ? '\ud83c\udf82 Bolo' : '\ud83c\udf6b Trufa'}: ${qtd} comprados\n`;
       }
       resposta += `   \ud83d\uded2 Total comprado: R$ ${h.totalComprado.toFixed(2)}\n`;
       if (h.totalPago > 0) resposta += `   \u2705 Total pago: R$ ${h.totalPago.toFixed(2)}\n`;
       resposta += `   \ud83d\udcb0 *Saldo devedor: R$ ${saldo.toFixed(2)}*\n`;
       totalGeral += saldo;
     }
-
     resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL GERAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
   } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
@@ -280,6 +291,13 @@ function parsearPagamento(texto) {
   if (!texto.toLowerCase().includes('pagou')) return null;
   const porValor = texto.match(/^(.+?)\s+pagou\s+(\d+[.,]?\d*)\s*(reais|r\$)?$/i);
   if (porValor) return { tipo: 'valor', nome: capitalizarNome(porValor[1].trim()), valor: parseFloat(porValor[2].replace(',', '.')) };
+  // Pagamento por extenso: "joao pagou duas trufas"
+  const porProdutoExt = texto.match(/^(.+?)\s+pagou\s+([a-zA-Z\u00C0-\u00FA]+)\s+(.+?)(?:\s+hoje)?$/i);
+  if (porProdutoExt) {
+    const qtd = converterNumero(porProdutoExt[2]);
+    const produto = identificarProduto(porProdutoExt[3]);
+    if (qtd && produto) return { tipo: 'produto', nome: capitalizarNome(porProdutoExt[1].trim()), qtd, produto };
+  }
   const porProduto = texto.match(/^(.+?)\s+pagou\s+(\d+)\s+(.+?)(?:\s+hoje)?$/i);
   if (porProduto) {
     const produto = identificarProduto(porProduto[3]);
@@ -288,18 +306,33 @@ function parsearPagamento(texto) {
   return null;
 }
 
+// Parseia mensagem com numero numerico ou por extenso
+// Ex: "julia 2 trufas", "julia duas trufas", "julia uma trufa"
 function parsearMensagem(texto) {
-  const match = texto.match(/^(.+?)\s+(\d+)\s+(.+)$/);
-  if (!match) return null;
-  const qtd = parseInt(match[2]);
-  const produto = identificarProduto(match[3].trim());
-  if (!produto || qtd <= 0) return null;
-  return { nome: capitalizarNome(match[1].trim()), quantidade: qtd, produto };
+  // Tenta com numero numerico primeiro
+  const matchNum = texto.match(/^(.+?)\s+(\d+)\s+(.+)$/);
+  if (matchNum) {
+    const qtd = parseInt(matchNum[2]);
+    const produto = identificarProduto(matchNum[3].trim());
+    if (produto && qtd > 0) return { nome: capitalizarNome(matchNum[1].trim()), quantidade: qtd, produto };
+  }
+  // Tenta com numero por extenso: "julia duas trufas"
+  // Formato: nome + palavra_numero + produto
+  const palavras = texto.trim().split(/\s+/);
+  for (let i = 1; i < palavras.length; i++) {
+    const qtd = converterNumero(palavras[i]);
+    if (qtd === null) continue;
+    const nome = palavras.slice(0, i).join(' ');
+    const restoProduto = palavras.slice(i + 1).join(' ');
+    const produto = identificarProduto(restoProduto);
+    if (produto && nome) return { nome: capitalizarNome(nome), quantidade: qtd, produto };
+  }
+  return null;
 }
 
 function isRelatorio(texto) {
   const t = texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  return t.includes('relatorio') || t.includes('saldo') || t.includes('me de o relatorio') || t.includes('relatorio geral');
+  return t.includes('relatorio') || t.includes('saldo') || t.includes('relatorio geral');
 }
 
 let reconectando = false;
@@ -351,12 +384,10 @@ async function iniciarBot() {
           if (msg.message.conversation) texto = msg.message.conversation;
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
-
           if (isRelatorio(texto)) {
             await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioGeral() });
             continue;
           }
-
           const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
           const respostas = [];
           for (const linha of linhas) {
