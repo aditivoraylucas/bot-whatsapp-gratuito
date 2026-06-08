@@ -21,10 +21,12 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY || '';
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
 
 const AUTH_DIR = 'auth_info';
-const PRECOS = { trufa: 5.0, bombom: 5.0, bolo: 12.0 };
+const PRECOS = { trufa: 5.0, bolo: 12.0 };
+
+// Sinonimos normalizados (sem acento, minusculo)
 const SINONIMOS = {
-  trufa: ['trufa', 'trufas', 'trufinha', 'bombom', 'bombons'],
-  bolo: ['bolo', 'bolinho', 'bolo de pote', 'bolo pote']
+  trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons', 'fruta', 'frutas'],
+  bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote']
 };
 
 const NUMEROS_EXTENSO = {
@@ -37,21 +39,17 @@ const NUMEROS_EXTENSO = {
   'dezenove': 19, 'vinte': 20
 };
 
-// Normaliza texto: minusculo + sem acentos + sem espacos extras
+// Normaliza: minusculo + sem acentos + trim
 function norm(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
-// Compara dois nomes ignorando acentos, maiusculas e espacos extras
-function mesmoNome(a, b) {
-  return norm(a) === norm(b);
-}
+function mesmoNome(a, b) { return norm(a) === norm(b); }
 
 function converterNumero(texto) {
   const n = norm(texto);
   if (/^\d+$/.test(n)) return parseInt(n);
-  if (NUMEROS_EXTENSO[n] !== undefined) return NUMEROS_EXTENSO[n];
-  return null;
+  return NUMEROS_EXTENSO[n] ?? null;
 }
 
 function extrairValor(texto) {
@@ -59,6 +57,21 @@ function extrairValor(texto) {
   const m = t.match(/(\d+[,.]?\d*)/);
   if (!m) return null;
   return parseFloat(m[1].replace(',', '.'));
+}
+
+// Identifica produto em um trecho de texto (testa do mais longo pro mais curto)
+function identificarProduto(texto) {
+  const n = norm(texto);
+  // Testa frases compostas primeiro ("bolo de pote")
+  for (const [produto, sins] of Object.entries(SINONIMOS))
+    for (const sin of sins.sort((a, b) => b.length - a.length))
+      if (n === norm(sin) || n.startsWith(norm(sin) + ' ') || n.endsWith(' ' + norm(sin)) || n.includes(' ' + norm(sin) + ' '))
+        return produto;
+  // Fallback: contains
+  for (const [produto, sins] of Object.entries(SINONIMOS))
+    for (const sin of sins)
+      if (n.includes(norm(sin))) return produto;
+  return null;
 }
 
 let botConectado = false;
@@ -119,15 +132,12 @@ http.createServer(async (req, res) => {
 function getAuth() {
   return new JWT({ email: GOOGLE_SERVICE_ACCOUNT_EMAIL, key: GOOGLE_PRIVATE_KEY, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
 }
-
 async function getDoc() {
   const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
   await doc.loadInfo();
   return doc;
 }
-
 async function getSheetSaldo() { return (await getDoc()).sheetsByIndex[0]; }
-
 async function getSheetHistorico() {
   const doc = await getDoc();
   if (doc.sheetCount < 2) return await doc.addSheet({ title: 'Historico', headerValues: ['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor'] });
@@ -135,26 +145,13 @@ async function getSheetHistorico() {
   try { await sheet.loadHeaderRow(); } catch(e) { await sheet.setHeaderRow(['Data', 'Cliente', 'Tipo', 'Produto', 'Quantidade', 'Valor']); }
   return sheet;
 }
-
 function agora() { return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
-
-// Busca nome do cliente na planilha ignorando acentos/maiusculas
-// Retorna o nome como esta cadastrado, ou o nome enviado se nao existir
-async function resolverNomeCliente(sheet, rows, nomeEnviado) {
-  const existing = rows.find(r => mesmoNome(r.get('Cliente'), nomeEnviado));
-  return existing ? existing.get('Cliente') : capitalizarNome(nomeEnviado);
-}
 
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
-    // Busca por nome normalizado (ignora acento/case)
-    const existente = rows.find(r =>
-      mesmoNome(r.get('Cliente'), clienteEnviado) &&
-      norm(r.get('Produto')) === norm(produto)
-    );
-    // Usa nome ja cadastrado se existir, senao capitaliza o enviado
+    const existente = rows.find(r => mesmoNome(r.get('Cliente'), clienteEnviado) && norm(r.get('Produto')) === norm(produto));
     const cliente = existente ? existente.get('Cliente') : capitalizarNome(clienteEnviado);
     const total = (PRECOS[produto] || 0) * quantidade;
     if (existente) {
@@ -162,13 +159,11 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
       const novoTotal = (PRECOS[produto] || 0) * novaQtd;
       existente.set('Quantidade', novaQtd); existente.set('Total', novoTotal.toFixed(2)); existente.set('UltimaCompra', agora());
       await existente.save();
-      const hist = await getSheetHistorico();
-      await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
+      await (await getSheetHistorico()).addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
       return { cliente, totalAcumulado: novoTotal, qtdAcumulada: novaQtd };
     } else {
       await sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: total.toFixed(2), UltimaCompra: agora() });
-      const hist = await getSheetHistorico();
-      await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
+      await (await getSheetHistorico()).addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: total.toFixed(2) });
       return { cliente, totalAcumulado: total, qtdAcumulada: quantidade };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
@@ -178,18 +173,14 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto) {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
-    const row = rows.find(r =>
-      mesmoNome(r.get('Cliente'), clienteEnviado) &&
-      norm(r.get('Produto')) === norm(produto)
-    );
+    const row = rows.find(r => mesmoNome(r.get('Cliente'), clienteEnviado) && norm(r.get('Produto')) === norm(produto));
     const cliente = row ? row.get('Cliente') : capitalizarNome(clienteEnviado);
     if (!row) return { ok: false, msg: `Nenhuma d\u00edvida de ${cliente} com ${produto} encontrada.` };
     const qtdAtual = parseInt(row.get('Quantidade') || '0');
     const qtdPaga = Math.min(quantidade, qtdAtual);
     const novaQtd = qtdAtual - qtdPaga;
     const pago = (PRECOS[produto] || 0) * qtdPaga;
-    const hist = await getSheetHistorico();
-    await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) });
+    await (await getSheetHistorico()).addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) });
     if (novaQtd === 0) { await row.delete(); return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.` }; }
     const novoTotal = (PRECOS[produto] || 0) * novaQtd;
     row.set('Quantidade', novaQtd); row.set('Total', novoTotal.toFixed(2)); await row.save();
@@ -205,8 +196,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago) {
     const cliente = rowsCliente.length ? rowsCliente[0].get('Cliente') : capitalizarNome(clienteEnviado);
     if (!rowsCliente.length) return { ok: false, msg: `Nenhuma d\u00edvida encontrada para ${cliente}.` };
     let totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
-    const hist = await getSheetHistorico();
-    await hist.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2) });
+    await (await getSheetHistorico()).addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2) });
     if (valorPago >= totalDevido) {
       for (const r of rowsCliente) await r.delete();
       return { ok: true, msg: `\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.` };
@@ -275,22 +265,13 @@ async function gerarRelatorioGeral() {
   } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
 }
 
-function identificarProduto(texto) {
-  const n = norm(texto);
-  for (const [produto, sins] of Object.entries(SINONIMOS))
-    for (const sin of sins)
-      if (n.includes(norm(sin))) return produto;
-  return null;
-}
-
 function capitalizarNome(nome) {
   return nome.trim().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 }
 
 function parsearPagamento(texto) {
   const t = norm(texto);
-  const temPagamento = /\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t);
-  if (!temPagamento) return null;
+  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t)) return null;
   const matchNome = texto.match(/^(.+?)\s+(?:pagou|pix|transferiu|depositou|mandou|enviou)/i);
   if (!matchNome) return null;
   const nome = matchNome[1].trim();
@@ -310,38 +291,45 @@ function parsearPagamento(texto) {
 }
 
 /**
- * Extrai TODOS os pares (quantidade, produto) de um trecho de texto.
- * Suporta:
- *   "2 trufas 1 bolo"
- *   "1 bolo mais uma trufa"
- *   "uma trufa e tres bolos"
- *   ", uma trufa e tres bolos"
+ * Extrai todos os pares (quantidade, produto) de um trecho.
+ * Estrategia: percorre as palavras procurando [numero][produto].
+ * Separadores "e", "mais", "+", "," sao ignorados.
+ *
+ * Exemplos:
+ *   "1 bolo e 3 frutas"   -> [{1, bolo}, {3, trufa}]
+ *   "2 trufas 1 bolo"     -> [{2, trufa}, {1, bolo}]
+ *   "uma trufa e tres bolos" -> [{1, trufa}, {3, bolo}]
  */
-function extrairItensDaLinha(texto) {
-  // Remove separadores: virgula, "mais", "+", "e" (quando entre itens)
-  const limpo = norm(texto)
+function extrairItens(texto) {
+  // Normaliza separadores
+  const palavras = norm(texto)
     .replace(/,/g, ' ')
     .replace(/\bmais\b/g, ' ')
     .replace(/\+/g, ' ')
     .replace(/\be\b/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .split(' ')
+    .filter(Boolean);
 
-  const palavras = limpo.split(' ');
   const itens = [];
   let i = 0;
   while (i < palavras.length) {
     const qtd = converterNumero(palavras[i]);
     if (qtd !== null) {
-      // Tenta produto nas proximas 1, 2 ou 3 palavras
+      // Tenta combinar produto nas proximas ate 3 palavras (do maior pro menor)
       let produto = null;
       let avanco = 1;
-      for (let len = 3; len >= 1; len--) {
+      for (let len = Math.min(3, palavras.length - i - 1); len >= 1; len--) {
         const trecho = palavras.slice(i + 1, i + 1 + len).join(' ');
-        produto = identificarProduto(trecho);
-        if (produto) { avanco = len + 1; break; }
+        const p = identificarProduto(trecho);
+        if (p) { produto = p; avanco = len + 1; break; }
       }
-      if (produto) { itens.push({ quantidade: qtd, produto }); i += avanco; continue; }
+      if (produto) {
+        itens.push({ quantidade: qtd, produto });
+        i += avanco;
+        continue;
+      }
     }
     i++;
   }
@@ -349,43 +337,38 @@ function extrairItensDaLinha(texto) {
 }
 
 /**
- * Parseia uma linha completa, extraindo nome + multiplos itens.
- * Exemplos:
- *   "raylucas 2 trufas 1 bolo"
- *   "raylucas 1 bolo mais uma trufa"
- *   "raylucas, uma trufa e tres bolos"
+ * Parseia linha completa: nome + multiplos itens.
+ * Retorna { nome, itens } ou null.
  */
 function parsearMensagem(texto) {
-  const t = norm(texto).replace(/,/g, ' ');
-  const palavras = t.split(/\s+/);
+  // Normaliza sem acentos para analise, mas preserva original para pegar nome
+  const palavrasNorm = norm(texto).replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+  const palavrasOrig = texto.replace(/,/g, ' ').split(/\s+/).filter(Boolean);
 
-  // Encontra a primeira palavra que seja um numero (inicio dos itens)
-  // O nome e tudo antes desse ponto
+  // Encontra o primeiro indice onde temos [numero] seguido de [produto reconhecido]
   let inicioProdutos = -1;
-  for (let i = 1; i < palavras.length; i++) {
-    if (converterNumero(palavras[i]) !== null) {
-      // Verifica se ha produto nas proximas palavras
-      const trecho = palavras.slice(i + 1, i + 4).join(' ');
-      if (identificarProduto(trecho) !== null) {
-        inicioProdutos = i;
-        break;
-      }
+  for (let i = 1; i < palavrasNorm.length; i++) {
+    if (converterNumero(palavrasNorm[i]) === null) continue;
+    // Verifica se ha produto logo apos
+    let temProduto = false;
+    for (let len = Math.min(3, palavrasNorm.length - i - 1); len >= 1; len--) {
+      if (identificarProduto(palavrasNorm.slice(i + 1, i + 1 + len).join(' '))) { temProduto = true; break; }
     }
+    if (temProduto) { inicioProdutos = i; break; }
   }
+
   if (inicioProdutos < 1) return null;
 
-  // Nome = palavras antes do primeiro numero
-  const nomeRaw = palavras.slice(0, inicioProdutos).join(' ');
-  // Remove palavras de ligacao no final do nome
-  const nome = nomeRaw.replace(/\b(mais|e|\+)\s*$/i, '').trim();
-  if (!nome) return null;
+  // Nome = palavras originais antes do primeiro numero
+  const nomeRaw = palavrasOrig.slice(0, inicioProdutos).join(' ').replace(/\b(mais|e|\+)\s*$/i, '').trim();
+  if (!nomeRaw) return null;
 
-  // Extrai todos os itens a partir do inicio
-  const restoOriginal = texto.split(/\s+/).slice(inicioProdutos).join(' ');
-  const itens = extrairItensDaLinha(restoOriginal);
+  // Extrai itens do trecho apos o nome
+  const trechoItens = palavrasNorm.slice(inicioProdutos).join(' ');
+  const itens = extrairItens(trechoItens);
   if (!itens.length) return null;
 
-  return { nome: capitalizarNome(nome), itens };
+  return { nome: capitalizarNome(nomeRaw), itens };
 }
 
 function isRelatorio(texto) {
@@ -452,7 +435,6 @@ async function iniciarBot() {
           const respostas = [];
 
           for (const linha of linhas) {
-            // 1. Tenta pagamento
             const pagamento = parsearPagamento(linha);
             if (pagamento) {
               const result = pagamento.tipo === 'valor'
@@ -462,7 +444,6 @@ async function iniciarBot() {
               continue;
             }
 
-            // 2. Tenta compra (suporta multiplos produtos)
             const parsed = parsearMensagem(linha);
             if (!parsed) continue;
 
@@ -476,7 +457,7 @@ async function iniciarBot() {
               }
             }
             if (linhasResposta.length) {
-              respostas.push(`*${capitalizarNome(parsed.nome)}*\n` + linhasResposta.join('\n'));
+              respostas.push(`*${parsed.nome}*\n` + linhasResposta.join('\n'));
             }
           }
 
