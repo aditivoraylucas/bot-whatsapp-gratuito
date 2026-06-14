@@ -214,19 +214,12 @@ async function processarPagamentoValor(clienteEnviado, valorPago) {
   } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
-/**
- * Relatorio usa EXCLUSIVAMENTE a aba Saldo como fonte de verdade.
- * O saldo ja reflete todos os pagamentos realizados (reducoes feitas em tempo real).
- * Isso garante que o relatorio esteja sempre atualizado e correto.
- */
+// Relatorio Geral: fonte de verdade = aba Saldo (saldo atual ja reflete pagamentos)
 async function gerarRelatorioGeral() {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
-
     if (!rows.length) return '\ud83d\udcca Nenhuma d\u00edvida em aberto no momento.';
-
-    // Agrupa por cliente
     const clientes = {};
     for (const row of rows) {
       const nome = (row.get('Cliente') || '').trim();
@@ -238,15 +231,10 @@ async function gerarRelatorioGeral() {
       clientes[nome].itens.push({ produto, quantidade, total });
       clientes[nome].totalDevido += total;
     }
-
     if (!Object.keys(clientes).length) return '\ud83d\udcca Nenhuma d\u00edvida em aberto no momento.';
-
-    // Ordena por maior devedor
     const ordenados = Object.entries(clientes).sort((a, b) => b[1].totalDevido - a[1].totalDevido);
-
     let resposta = '\ud83d\udcca *Relat\u00f3rio de D\u00edvidas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral = 0;
-
     for (const [nome, dados] of ordenados) {
       resposta += `\n\ud83d\udc64 *${nome}*\n`;
       for (const item of dados.itens) {
@@ -257,13 +245,75 @@ async function gerarRelatorioGeral() {
       resposta += `   \ud83d\udcb0 *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
       totalGeral += dados.totalDevido;
     }
-
     resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
-  } catch (err) {
-    console.error('Erro relatorio:', err.message);
-    return '\u274c Erro ao gerar relat\u00f3rio.';
-  }
+  } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
+}
+
+// Relatorio Detalhado: le o Historico completo e mostra cada movimentacao com data
+async function gerarRelatorioDetalhado() {
+  try {
+    const doc = await getDoc();
+    // Saldo atual por cliente
+    const rowsSaldo = await doc.sheetsByIndex[0].getRows();
+    const saldos = {};
+    for (const row of rowsSaldo) {
+      const nome = (row.get('Cliente') || '').trim();
+      const total = parseFloat(row.get('Total') || '0');
+      if (!nome) continue;
+      if (!saldos[nome]) saldos[nome] = 0;
+      saldos[nome] += total;
+    }
+    // Historico
+    if (doc.sheetCount < 2) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    const sheetHist = doc.sheetsByIndex[1];
+    try { await sheetHist.loadHeaderRow(); } catch(e) { return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.'; }
+    const rowsHist = await sheetHist.getRows();
+    if (!rowsHist.length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    // Agrupa movimentacoes por cliente
+    const historico = {};
+    for (const row of rowsHist) {
+      const nome = (row.get('Cliente') || '').trim();
+      if (!nome) continue;
+      if (!historico[nome]) historico[nome] = [];
+      historico[nome].push({
+        data:     (row.get('Data') || '').trim(),
+        tipo:     (row.get('Tipo') || '').trim(),
+        produto:  norm(row.get('Produto') || ''),
+        qtd:      (row.get('Quantidade') || '').trim(),
+        valor:    parseFloat(row.get('Valor') || '0')
+      });
+    }
+    if (!Object.keys(historico).length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    // Ordena clientes por maior saldo devedor atual
+    const nomesOrdenados = Object.keys(historico).sort((a, b) => (saldos[b] || 0) - (saldos[a] || 0));
+    let resposta = '\ud83d\udcdd *Relat\u00f3rio Detalhado*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let totalGeral = 0;
+    for (const nome of nomesOrdenados) {
+      const movs = historico[nome];
+      const saldoAtual = saldos[nome] || 0;
+      resposta += `\n\ud83d\udc64 *${nome}*\n`;
+      for (const m of movs) {
+        if (m.tipo === 'Compra') {
+          const emoji = m.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+          const nomeProd = m.produto === 'bolo' ? 'Bolo' : 'Trufa';
+          resposta += `   \ud83d\uded2 ${emoji} Compra: ${m.qtd}x ${nomeProd} = R$ ${m.valor.toFixed(2)}\n`;
+          resposta += `      \ud83d\udcc5 ${m.data}\n`;
+        } else if (m.tipo === 'Pagamento') {
+          resposta += `   \u2705 Pagamento: R$ ${m.valor.toFixed(2)}\n`;
+          resposta += `      \ud83d\udcc5 ${m.data}\n`;
+        }
+      }
+      if (saldoAtual > 0) {
+        resposta += `   \ud83d\udcb0 *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
+        totalGeral += saldoAtual;
+      } else {
+        resposta += `   \u2705 *Sem d\u00edvidas em aberto*\n`;
+      }
+    }
+    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    return resposta;
+  } catch (err) { console.error('Erro relatorio detalhado:', err.message); return '\u274c Erro ao gerar relat\u00f3rio detalhado.'; }
 }
 
 function parsearLinha(linha) {
@@ -273,11 +323,9 @@ function parsearLinha(linha) {
     .replace(/\+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-
   const palavrasOrig = limpa.split(' ').filter(Boolean);
   const palavrasNorm = palavrasOrig.map(norm);
   const n = palavrasNorm.length;
-
   let inicioItens = -1;
   for (let i = 0; i < n; i++) {
     const p1 = toProduto(palavrasNorm[i]);
@@ -289,12 +337,9 @@ function parsearLinha(linha) {
       if (ok2 || ok1) { inicioItens = i; break; }
     }
   }
-
   if (inicioItens < 1) return null;
-
   const nomeRaw = palavrasOrig.slice(0, inicioItens).join(' ').trim();
   if (!nomeRaw) return null;
-
   const itens = [];
   let i = inicioItens;
   while (i < n) {
@@ -315,7 +360,6 @@ function parsearLinha(linha) {
     if (p1) { itens.push({ quantidade: 1, produto: p1 }); i += 1; continue; }
     i++;
   }
-
   if (!itens.length) return null;
   return { nome: capitalizarNome(nomeRaw), itens };
 }
@@ -353,9 +397,12 @@ function parsearPagamento(linha) {
   return null;
 }
 
-function isRelatorio(texto) {
+// Detecta qual relatorio foi pedido
+function tipoRelatorio(texto) {
   const t = norm(texto);
-  return t.includes('relatorio') || t.includes('saldo') || t.includes('relatorio geral');
+  if (t.includes('relatorio detalhado') || t.includes('relatorio detalhado')) return 'detalhado';
+  if (t.includes('relatorio') || t.includes('saldo') || t.includes('relatorio geral')) return 'geral';
+  return null;
 }
 
 let reconectando = false;
@@ -408,7 +455,13 @@ async function iniciarBot() {
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
 
-          if (isRelatorio(texto)) {
+          // Verifica se e pedido de relatorio (detalhado ou geral)
+          const qual = tipoRelatorio(texto);
+          if (qual === 'detalhado') {
+            await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioDetalhado() });
+            continue;
+          }
+          if (qual === 'geral') {
             await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioGeral() });
             continue;
           }
