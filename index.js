@@ -11,7 +11,7 @@ const http = require('http');
 const qrcode = require('qrcode');
 const pino = require('pino');
 
-const GRUPO_NOME  = process.env.GRUPO_NOME  || 'vendas';
+const GRUPO_NOME   = process.env.GRUPO_NOME   || 'vendas';
 const SPREADSHEET_ID               = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY           = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
@@ -21,7 +21,7 @@ const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID|| '';
 
 const AUTH_DIR = 'auth_info';
 
-// ─── PRECOS E PRODUTOS DINAMICOS ─────────────────────────────────────────────
+// ─── PRECOS E PRODUTOS ────────────────────────────────────────────────────────
 const PRECOS_FILE = 'precos.json';
 let PRECOS = { trufa: 5.0, bolo: 12.0 };
 try { if (fs.existsSync(PRECOS_FILE)) PRECOS = JSON.parse(fs.readFileSync(PRECOS_FILE, 'utf8')); } catch(e) {}
@@ -29,8 +29,9 @@ function salvarPrecos() { try { fs.writeFileSync(PRECOS_FILE, JSON.stringify(PRE
 
 const LIMITE_CREDITO_PADRAO = parseFloat(process.env.LIMITE_CREDITO || '0');
 
+// FIX: 'fruta'/'frutas' removidos definitivamente dos sinonimos de trufa
 const SINONIMOS = {
-  trufa: ['trufa','trufas','trufinha','trufinhas','bombom','bombons','fruta','frutas'],
+  trufa: ['trufa','trufas','trufinha','trufinhas','bombom','bombons'],
   bolo:  ['bolo','bolos','bolinho','bolinhos','bolo de pote','bolo pote']
 };
 const SINONIMOS_EXTRA = {};
@@ -44,7 +45,7 @@ const NUMEROS_EXTENSO = {
   'dezessete':17,'dezoito':18,'dezenove':19,'vinte':20
 };
 
-// ─── MESES VALIDOS ───────────────────────────────────────────────────────────
+// ─── MESES VALIDOS ────────────────────────────────────────────────────────────
 const MESES_VALIDOS = new Set([
   'janeiro','fevereiro','marco','abril','maio','junho',
   'julho','agosto','setembro','outubro','novembro','dezembro',
@@ -56,7 +57,7 @@ function isMes(str) {
   return MESES_VALIDOS.has(n) || /^\d{1,2}$/.test(n);
 }
 
-// ─── ULTIMOS LANCAMENTOS POR GRUPO (para cancelar) ───────────────────────────
+// ─── HISTORICO DE LANCAMENTOS (cancelar) ──────────────────────────────────────
 const ULTIMOS_LANCAMENTOS = {};
 const MAX_HIST_CANCEL = 10;
 function pushLancamento(jid, obj) {
@@ -85,7 +86,7 @@ function nomesFuzzyIguais(digitado, cadastrado) {
   if(na.length!==nb.length) return false;
   for(let i=0;i<na.length;i++){
     const maxLen=Math.max(na[i].length,nb[i].length);
-    if(levenshtein(na[i],nb[i])>( maxLen<=5?1:2)) return false;
+    if(levenshtein(na[i],nb[i])>(maxLen<=5?1:2)) return false;
   }
   return true;
 }
@@ -118,7 +119,13 @@ function toProduto(trecho) {
 }
 
 function extrairValor(texto) {
-  const t=norm(texto).replace(/r\$\s*/g,'').replace(/reais/g,'').replace(/pix/g,'').trim();
+  // Remove prefixos comuns antes de extrair o número
+  const t=norm(texto)
+    .replace(/r\$\s*/g,'')
+    .replace(/\breais\b/g,'')
+    .replace(/\bpix\b/g,'')
+    .replace(/\bde\b/g,'')
+    .trim();
   const m=t.match(/(\d+[,.]?\d*)/);
   if(!m) return null;
   return parseFloat(m[1].replace(',','.'));
@@ -128,11 +135,23 @@ function agora() { return new Date().toLocaleString('pt-BR',{timeZone:'America/S
 function capitalizarNome(n) {
   return n.trim().split(' ').map(p=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join(' ');
 }
+function emojiProduto(produto) {
+  if(produto==='bolo') return '🎂';
+  if(produto==='trufa') return '🍫';
+  return '🪄';
+}
+function nomeProdutoExib(produto) {
+  if(produto==='bolo') return 'Bolo';
+  if(produto==='trufa') return 'Trufa';
+  return capitalizarNome(produto.replace(/_/g,' '));
+}
 
 let botConectado=false;
 let qrCodeData=null;
 let sockGlobal=null;
 let jidGrupoGlobal=null;
+// FIX: flag para evitar agendarTarefas duplo em reconexão
+let agendamentosIniciados=false;
 
 function restaurarSessao() {
   try {
@@ -204,6 +223,7 @@ async function getSheetHistorico() {
 }
 
 // ─── REGISTRAR COMPRA ─────────────────────────────────────────────────────────
+// Preço ATUAL * quantidade é somado ao Total existente (saldo antigo fica intacto)
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const sheet=await getSheetSaldo();
@@ -222,7 +242,7 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
     }
 
     if(existente){
-      const qtdAcumulada = parseInt(existente.get('Quantidade')||'0')+quantidade;
+      const qtdAcumulada   = parseInt(existente.get('Quantidade')||'0')+quantidade;
       const totalAcumulado = parseFloat(existente.get('Total')||'0')+valorNovo;
       existente.set('Quantidade',qtdAcumulada);
       existente.set('Total',totalAcumulado.toFixed(2));
@@ -238,7 +258,7 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   } catch(err){console.error('Erro planilha:',err.message);return null;}
 }
 
-// ─── CANCELAR ULTIMO LANCAMENTO ───────────────────────────────────────────────
+// ─── CANCELAR LANCAMENTO ──────────────────────────────────────────────────────
 async function cancelarLancamento(jid, nomeDigitado) {
   try {
     const hist = ULTIMOS_LANCAMENTOS[jid] || [];
@@ -258,28 +278,31 @@ async function cancelarLancamento(jid, nomeDigitado) {
     if(lanc.tipo==='compra'){
       const row=rows.find(r=>r.get('Cliente')===lanc.cliente&&norm(r.get('Produto'))===norm(lanc.produto));
       if(row){
-        const novaQtd=parseInt(row.get('Quantidade')||'0')-lanc.quantidade;
-        const novoTotal=parseFloat(row.get('Total')||'0')-lanc.valor;
-        if(novaQtd<=0||novoTotal<=0){
-          await row.delete();
-        } else {
-          row.set('Quantidade',novaQtd); row.set('Total',novoTotal.toFixed(2)); await row.save();
-        }
+        const novaQtd  = parseInt(row.get('Quantidade')||'0')-lanc.quantidade;
+        const novoTotal= parseFloat(row.get('Total')||'0')-lanc.valor;
+        if(novaQtd<=0||novoTotal<=0){ await row.delete(); }
+        else { row.set('Quantidade',novaQtd); row.set('Total',novoTotal.toFixed(2)); await row.save(); }
       }
       for(let i=rowsH.length-1;i>=0;i--){
         if(rowsH[i].get('Cliente')===lanc.cliente&&norm(rowsH[i].get('Produto'))===norm(lanc.produto)&&rowsH[i].get('Tipo')==='Compra'){
           await rowsH[i].delete(); break;
         }
       }
-      return `\u2197\ufe0f Lan\u00e7amento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${lanc.produto} (R$ ${lanc.valor.toFixed(2)})`;
+      return `\u2197\ufe0f Lan\u00e7amento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${nomeProdutoExib(lanc.produto)} (R$ ${lanc.valor.toFixed(2)})`;
     }
 
     if(lanc.tipo==='pagamento'){
       const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),lanc.cliente));
       if(rowsC.length){
-        const first=rowsC[0];
-        const novoTotal=parseFloat(first.get('Total')||'0')+lanc.valor;
-        first.set('Total',novoTotal.toFixed(2)); await first.save();
+        // FIX: distribui o valor cancelado proporcionalmente entre as linhas do cliente
+        let restante=lanc.valor;
+        for(const r of rowsC){
+          if(restante<=0) break;
+          const novoTotal=parseFloat(r.get('Total')||'0')+restante;
+          r.set('Total',novoTotal.toFixed(2));
+          await r.save();
+          restante=0;
+        }
       } else {
         const produto=lanc.produto&&lanc.produto!=='geral'?lanc.produto:'trufa';
         await sheet.addRow({Cliente:lanc.cliente,Produto:produto,Quantidade:0,Total:lanc.valor.toFixed(2),UltimaCompra:agora()});
@@ -296,56 +319,71 @@ async function cancelarLancamento(jid, nomeDigitado) {
   } catch(err){console.error('Erro cancelar:',err.message);return '\u274c Erro ao cancelar lan\u00e7amento.';}
 }
 
-// ─── PAGAMENTOS ───────────────────────────────────────────────────────────────
+// ─── PAGAMENTO POR PRODUTO (ex: julia pagou 2 trufas) ─────────────────────────
 async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid) {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
     const cliente=row?row.get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!row) return{ok:false,msg:`Nenhuma d\u00edvida de ${cliente} com ${produto} encontrada.`};
-    const qtdAtual=parseInt(row.get('Quantidade')||'0');
-    const qtdPaga=Math.min(quantidade,qtdAtual);
-    const novaQtd=qtdAtual-qtdPaga;
-    const totalAtual=parseFloat(row.get('Total')||'0');
-    const pago=qtdAtual>0?(totalAtual/qtdAtual)*qtdPaga:0;
+    if(!row) return{ok:false,msg:`\u274c Nenhuma d\u00edvida de *${cliente}* com ${nomeProdutoExib(produto)} encontrada.`};
+    const qtdAtual  = parseInt(row.get('Quantidade')||'0');
+    const qtdPaga   = Math.min(quantidade,qtdAtual);
+    const novaQtd   = qtdAtual-qtdPaga;
+    const totalAtual= parseFloat(row.get('Total')||'0');
+    // Calcula valor proporcional (respeita preço original embutido no saldo)
+    const pago = qtdAtual>0 ? (totalAtual/qtdAtual)*qtdPaga : 0;
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto,quantidade:qtdPaga,valor:pago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
-    if(novaQtd===0){await row.delete();return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida de ${produto}! Pagou R$ ${pago.toFixed(2)}.`};}
+    if(novaQtd===0){
+      await row.delete();
+      return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
+    }
     const novoTotal=totalAtual-pago;
-    row.set('Quantidade',novaQtd);row.set('Total',novoTotal.toFixed(2));await row.save();
-    return{ok:true,msg:`\u2705 *${cliente}* pagou ${qtdPaga} ${produto}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){return{ok:false,msg:'\u274c Erro ao registrar pagamento.'}}
+    row.set('Quantidade',novaQtd);
+    row.set('Total',novoTotal.toFixed(2));
+    await row.save();
+    return{ok:true,msg:`\u2705 *${cliente}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
+// ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
 async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
     const rowsCliente=rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
     const cliente=rowsCliente.length?rowsCliente[0].get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!rowsCliente.length) return{ok:false,msg:`Nenhuma d\u00edvida encontrada para ${cliente}.`};
-    let totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+    if(!rowsCliente.length) return{ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${cliente}*.`};
+    const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
     if(valorPago>=totalDevido){
       for(const r of rowsCliente) await r.delete();
       return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.`};
     }
+    // FIX: abate do Total diretamente, SEM recalcular Quantidade com preço atual
+    // Quantidade fica proporcional ao saldo restante usando a "média" do saldo atual
     let restante=valorPago;
     for(const r of rowsCliente){
       if(restante<=0) break;
       const totalRow=parseFloat(r.get('Total')||'0');
-      if(restante>=totalRow){restante-=totalRow;await r.delete();}
-      else{
-        r.set('Total',(totalRow-restante).toFixed(2));
-        const preco=PRECOS[r.get('Produto')]||5;
-        r.set('Quantidade',Math.ceil((totalRow-restante)/preco));
-        await r.save(); restante=0;
+      if(restante>=totalRow){
+        restante-=totalRow;
+        await r.delete();
+      } else {
+        const novoTotal=totalRow-restante;
+        r.set('Total',novoTotal.toFixed(2));
+        // FIX: Quantidade é ajustada proporcionalmente ao total restante (não usa preço atual)
+        const qtdAtual=parseInt(r.get('Quantidade')||'0');
+        const novaQtd=totalRow>0?Math.round(qtdAtual*(novoTotal/totalRow)):0;
+        r.set('Quantidade',Math.max(novaQtd,0));
+        await r.save();
+        restante=0;
       }
     }
     return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){return{ok:false,msg:'\u274c Erro ao registrar pagamento.'}}
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -372,9 +410,7 @@ async function gerarRelatorioGeral() {
     for(const [nome,dados] of ordenados){
       resposta+=`\n\ud83d\udc64 *${nome}*\n`;
       for(const item of dados.itens){
-        const emoji=item.produto==='bolo'?'\ud83c\udf82':'\ud83c\udf6b';
-        const nomeProduto=item.produto==='bolo'?'Bolo':capitalizarNome(item.produto);
-        resposta+=`   ${emoji} ${nomeProduto}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
+        resposta+=`   ${emojiProduto(item.produto)} ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
       }
       resposta+=`   \ud83d\udcb0 *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
       totalGeral+=dados.totalDevido;
@@ -411,12 +447,10 @@ async function carregarHistoricoAgrupado(filtroMes) {
       const partes=data.split(' ')[0].split('/');
       if(partes.length>=2){
         const mesNum=parseInt(partes[1]);
-        const nomes=['','janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+        const nomesArr=['','janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
         const filtroNorm=norm(filtroMes);
         const filtroNumero=parseInt(filtroNorm);
-        const bateu= isNaN(filtroNumero)
-          ? norm(nomes[mesNum])===filtroNorm
-          : mesNum===filtroNumero;
+        const bateu=isNaN(filtroNumero)?norm(nomesArr[mesNum])===filtroNorm:mesNum===filtroNumero;
         if(!bateu) continue;
       }
     }
@@ -434,7 +468,7 @@ async function carregarHistoricoAgrupado(filtroMes) {
   return{historico,saldos};
 }
 
-// ─── RELATORIO DETALHADO (so devedores) ──────────────────────────────────────
+// ─── RELATORIO DETALHADO (só devedores) ───────────────────────────────────────
 async function gerarRelatorioDetalhado() {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
@@ -450,9 +484,7 @@ async function gerarRelatorioDetalhado() {
       resposta+=`\n\ud83d\udc64 *${nome}*\n`;
       for(const m of movs){
         if(m.tipo==='Compra'){
-          const nomeProd=m.produto==='bolo'?'Bolo':capitalizarNome(m.produto);
-          const emoji=m.produto==='bolo'?'\ud83c\udf82':'\ud83c\udf6b';
-          resposta+=`   \ud83d\uded2 ${emoji} Compra: ${m.qtd}x ${nomeProd} = R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
+          resposta+=`   \ud83d\uded2 ${emojiProduto(m.produto)} Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
         } else if(m.tipo==='Pagamento'){
           resposta+=`   \u2705 Pagamento: R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
         }
@@ -480,9 +512,7 @@ async function gerarRelatorioQuitados() {
       resposta+=`\n\ud83d\udc64 *${nome}*\n`;
       for(const m of movs){
         if(m.tipo==='Compra'){
-          const emoji=m.produto==='bolo'?'\ud83c\udf82':'\ud83c\udf6b';
-          const nomeProd=m.produto==='bolo'?'Bolo':capitalizarNome(m.produto);
-          resposta+=`   \ud83d\uded2 ${emoji} Compra: ${m.qtd}x ${nomeProd} = R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
+          resposta+=`   \ud83d\uded2 ${emojiProduto(m.produto)} Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
         } else if(m.tipo==='Pagamento'){
           resposta+=`   \ud83d\udcb3 Pagamento: R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
         }
@@ -501,7 +531,14 @@ async function gerarSaldoIndividual(nomeDigitado) {
     const rows=await sheet.getRows();
     const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
     const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
-    if(!nomeCanon) return `\u274c Nenhuma movimenta\u00e7\u00e3o encontrada para *${capitalizarNome(nomeDigitado)}*.`;
+    // FIX: se não achar na aba Saldo, pode ter quitado tudo — busca no histórico
+    if(!nomeCanon){
+      const{historico,saldos}=await carregarHistoricoAgrupado();
+      const nomeHist=resolverNome(nomeDigitado,Object.keys(historico));
+      if(nomeHist && !(saldos[nomeHist]>0))
+        return `\u2705 *${nomeHist}* n\u00e3o tem d\u00edvidas em aberto. Conta quitada! \ud83c\udf89`;
+      return `\u274c Nenhuma movimenta\u00e7\u00e3o encontrada para *${capitalizarNome(nomeDigitado)}*.`;
+    }
     const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
     if(!rowsCliente.length) return `\u2705 *${nomeCanon}* n\u00e3o tem d\u00edvidas em aberto.`;
     let totalDevido=0;
@@ -510,14 +547,12 @@ async function gerarSaldoIndividual(nomeDigitado) {
       const produto=norm(row.get('Produto')||'');
       const qtd=parseInt(row.get('Quantidade')||'0');
       const total=parseFloat(row.get('Total')||'0');
-      const emoji=produto==='bolo'?'\ud83c\udf82':'\ud83c\udf6b';
-      const nomeProd=produto==='bolo'?'Bolo':capitalizarNome(produto);
-      resposta+=`${emoji} ${nomeProd}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
+      resposta+=`${emojiProduto(produto)} ${nomeProdutoExib(produto)}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
       totalDevido+=total;
     }
     resposta+=`\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb0 *Total devido: R$ ${totalDevido.toFixed(2)}*`;
     return resposta;
-  } catch(err){return '\u274c Erro ao consultar saldo.';}
+  } catch(err){console.error('Erro saldo:',err.message);return '\u274c Erro ao consultar saldo.';}
 }
 
 // ─── HISTORICO INDIVIDUAL ─────────────────────────────────────────────────────
@@ -533,9 +568,7 @@ async function gerarHistoricoCliente(nomeDigitado) {
     let totalComprado=0, totalPago=0;
     for(const m of movs){
       if(m.tipo==='Compra'){
-        const emoji=m.produto==='bolo'?'\ud83c\udf82':'\ud83c\udf6b';
-        const nomeProd=m.produto==='bolo'?'Bolo':capitalizarNome(m.produto);
-        resposta+=`\ud83d\uded2 ${emoji} Compra: ${m.qtd}x ${nomeProd} = R$ ${m.valor.toFixed(2)}\n   \ud83d\udcc5 ${m.data}\n`;
+        resposta+=`\ud83d\uded2 ${emojiProduto(m.produto)} Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}\n   \ud83d\udcc5 ${m.data}\n`;
         totalComprado+=m.valor;
       } else if(m.tipo==='Pagamento'){
         resposta+=`\u2705 Pagamento: R$ ${m.valor.toFixed(2)}\n   \ud83d\udcc5 ${m.data}\n`;
@@ -549,7 +582,7 @@ async function gerarHistoricoCliente(nomeDigitado) {
       ?`\ud83d\udcb0 *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`
       :'\u2705 *Conta quitada!*';
     return resposta;
-  } catch(err){return '\u274c Erro ao buscar hist\u00f3rico.';}
+  } catch(err){console.error('Erro historico:',err.message);return '\u274c Erro ao buscar hist\u00f3rico.';}
 }
 
 // ─── RELATORIO DO MES ─────────────────────────────────────────────────────────
@@ -568,12 +601,12 @@ async function gerarRelatorioMes(mes) {
       const comprado=movs.filter(m=>m.tipo==='Compra').reduce((s,m)=>s+m.valor,0);
       const pago=movs.filter(m=>m.tipo==='Pagamento').reduce((s,m)=>s+m.valor,0);
       qtdTrufa+=movs.filter(m=>m.tipo==='Compra'&&m.produto==='trufa').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
-      qtdBolo+=movs.filter(m=>m.tipo==='Compra'&&m.produto==='bolo').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
+      qtdBolo +=movs.filter(m=>m.tipo==='Compra'&&m.produto==='bolo').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
       totalVendas+=comprado; totalRecebido+=pago;
       detalhe+=`\n\ud83d\udc64 *${nome}*: comprou R$ ${comprado.toFixed(2)} | pagou R$ ${pago.toFixed(2)}\n`;
     }
-    return `\ud83d\udcc5 *Relat\u00f3rio de ${nomeMesExib}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n${detalhe}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83c\udf6b Trufas vendidas: ${qtdTrufa} unid.\n\ud83c\udf82 Bolos vendidos: ${qtdBolo} unid.\n\ud83d\udcb5 Total em vendas: R$ ${totalVendas.toFixed(2)}\n\u2705 Total recebido: R$ ${totalRecebido.toFixed(2)}\n\u26a0\ufe0f A receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
-  } catch(err){return '\u274c Erro ao gerar relat\u00f3rio do m\u00eas.';}
+    return `\ud83d\udcc5 *Relat\u00f3rio de ${nomeMesExib}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n${detalhe}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83c\udf6b Trufas: ${qtdTrufa} unid. | \ud83c\udf82 Bolos: ${qtdBolo} unid.\n\ud83d\udcb5 Total em vendas: R$ ${totalVendas.toFixed(2)}\n\u2705 Total recebido: R$ ${totalRecebido.toFixed(2)}\n\u26a0\ufe0f A receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
+  } catch(err){console.error('Erro relatorio mes:',err.message);return '\u274c Erro ao gerar relat\u00f3rio do m\u00eas.';}
 }
 
 // ─── RESUMO DIARIO ────────────────────────────────────────────────────────────
@@ -589,7 +622,7 @@ async function gerarResumoDiario() {
         if(m.tipo==='Compra'){
           totalVendas+=m.valor;
           if(m.produto==='trufa') qtdTrufa+=parseInt(m.qtd||'0');
-          if(m.produto==='bolo')  qtdBolo+=parseInt(m.qtd||'0');
+          if(m.produto==='bolo')  qtdBolo +=parseInt(m.qtd||'0');
           clientes.add(nome);
         } else if(m.tipo==='Pagamento'){
           totalPago+=m.valor;
@@ -599,8 +632,8 @@ async function gerarResumoDiario() {
     const sheetSaldo=await getSheetSaldo();
     const rows=await sheetSaldo.getRows();
     const totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    return `\ud83d\udcc6 *Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83c\udf6b Trufas vendidas hoje: ${qtdTrufa}\n\ud83c\udf82 Bolos vendidos hoje: ${qtdBolo}\n\ud83d\udc65 Clientes atendidos: ${clientes.size}\n\ud83d\udcb0 Vendas do dia: R$ ${totalVendas.toFixed(2)}\n\u2705 Recebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcca Total em aberto: R$ ${totalAberto.toFixed(2)}`;
-  } catch(err){return '\u274c Erro ao gerar resumo.';}
+    return `\ud83d\udcc6 *Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83c\udf6b Trufas: ${qtdTrufa} | \ud83c\udf82 Bolos: ${qtdBolo}\n\ud83d\udc65 Clientes atendidos: ${clientes.size}\n\ud83d\udcb0 Vendas do dia: R$ ${totalVendas.toFixed(2)}\n\u2705 Recebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcca Total em aberto: R$ ${totalAberto.toFixed(2)}`;
+  } catch(err){console.error('Erro resumo:',err.message);return '\u274c Erro ao gerar resumo.';}
 }
 
 // ─── LEMBRETE DE COBRANCA ─────────────────────────────────────────────────────
@@ -629,21 +662,27 @@ async function verificarLembretes(sock, jid) {
         clientes[nome].dias=Math.max(clientes[nome].dias,diasPassados);
       }
     }
+    const nomes=Object.keys(clientes);
+    if(!nomes.length){
+      // Chamado manualmente: informa que não há pendentes
+      return;
+    }
     for(const [nome,dados] of Object.entries(clientes)){
-      const msg=`\u26a0\ufe0f *Lembrete de cobranca*\n\ud83d\udc64 *${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
+      const msg=`\u26a0\ufe0f *Lembrete de cobran\u00e7a*\n\ud83d\udc64 *${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
       await sock.sendMessage(jid,{text:msg});
     }
   } catch(e){console.error('Erro lembrete:',e.message);}
 }
 
-// ─── MUDAR PRECO DE PRODUTO ───────────────────────────────────────────────────
+// ─── MUDAR PRECO ──────────────────────────────────────────────────────────────
+// Saldos existentes NÃO são alterados. O novo preço vale só para novas compras.
 function mudarPreco(produto, novoPreco) {
   const p=toProduto(produto);
   if(!p) return `\u274c Produto *${produto}* n\u00e3o encontrado.`;
   const precoAntigo=PRECOS[p]||0;
   PRECOS[p]=novoPreco;
   salvarPrecos();
-  return `\u2705 Pre\u00e7o de *${capitalizarNome(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} \u2192 R$ ${novoPreco.toFixed(2)}\n_Saldos existentes n\u00e3o foram alterados._`;
+  return `\u2705 Pre\u00e7o de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} \u2192 R$ ${novoPreco.toFixed(2)}\n_Saldos existentes n\u00e3o foram alterados. Vale para novas compras._`;
 }
 
 // ─── NOVO PRODUTO ─────────────────────────────────────────────────────────────
@@ -651,13 +690,49 @@ function cadastrarNovoProduto(nomeProduto, preco) {
   const key=norm(nomeProduto).replace(/\s+/g,'_');
   if(PRECOS[key]!==undefined) return `\u26a0\ufe0f Produto *${nomeProduto}* j\u00e1 existe. Para mudar o pre\u00e7o: _preco ${nomeProduto} R$XX_`;
   PRECOS[key]=preco;
-  SINONIMOS_EXTRA[key]=[norm(nomeProduto)];
+  // FIX: registra o nome original E a versão normalizada como sinônimos
+  SINONIMOS_EXTRA[key]=[norm(nomeProduto), nomeProduto.toLowerCase().trim()];
+  // Remove duplicatas
+  SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];
   salvarPrecos();
   salvarSinonimosExtra();
-  return `\u2705 Novo produto cadastrado!\n\ud83d\udee4 *${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}`;
+  return `\u2705 Novo produto cadastrado!\n\ud83e\udee4 *${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _\"cliente nome ${norm(nomeProduto)}\"_`;
+}
+
+// ─── LISTAR PRODUTOS ──────────────────────────────────────────────────────────
+function listarProdutos() {
+  const todos=todosOsSinonimos();
+  let msg='\ud83e\udee4 *Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+  for(const [key] of Object.entries(todos)){
+    const preco=PRECOS[key];
+    if(preco===undefined) continue;
+    msg+=`${emojiProduto(key)} *${nomeProdutoExib(key)}*: R$ ${preco.toFixed(2)}\n`;
+  }
+  msg+='\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_Para mudar o pre\u00e7o: preco [produto] [valor]_';
+  return msg;
+}
+
+// ─── ZERAR CLIENTE ────────────────────────────────────────────────────────────
+async function zerarCliente(nomeDigitado) {
+  try {
+    const sheet=await getSheetSaldo();
+    const rows=await sheet.getRows();
+    const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
+    const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
+    if(!nomeCanon) return `\u274c Cliente *${capitalizarNome(nomeDigitado)}* n\u00e3o encontrado.`;
+    const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
+    if(!rowsCliente.length) return `\u2705 *${nomeCanon}* j\u00e1 est\u00e1 sem d\u00edvidas.`;
+    const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+    for(const r of rowsCliente) await r.delete();
+    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
+    return `\u2705 D\u00edvida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
+  } catch(err){console.error('Erro zerar:',err.message);return '\u274c Erro ao zerar cliente.';}
 }
 
 // ─── PARSER DE LINHA ──────────────────────────────────────────────────────────
+// Palavras reservadas que não podem ser nome de cliente
+const PALAVRAS_RESERVADAS = new Set(['pagou','pix','transferiu','depositou','mandou','enviou','cancelar','saldo','historico','historico','relatorio','relatorio','resumo','cobrar','lembrete','lembretes','preco','preco','produtos','zerar','novo']);
+
 function parsearLinha(linha) {
   const limpa=linha.replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
   const palavrasOrig=limpa.split(' ').filter(Boolean);
@@ -677,6 +752,8 @@ function parsearLinha(linha) {
   if(inicioItens<1) return null;
   const nomeRaw=palavrasOrig.slice(0,inicioItens).join(' ').trim();
   if(!nomeRaw) return null;
+  // FIX: não aceita como nome palavras reservadas de comando
+  if(PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
   const itens=[];
   let i=inicioItens;
   while(i<n){
@@ -693,24 +770,39 @@ function parsearLinha(linha) {
   return{nome:capitalizarNome(nomeRaw),itens};
 }
 
+// FIX: parsearPagamento — robusto para nomes que contêm sinônimos de produto
 function parsearPagamento(linha) {
   const t=norm(linha);
+  // Deve conter uma palavra-chave de pagamento
   if(!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t)) return null;
-  const matchNome=linha.match(/^(.+?)\s+(?:pagou|pix|transferiu|depositou|mandou|enviou)/i);
-  if(!matchNome) return null;
-  const nome=matchNome[1].trim();
-  const resto=linha.slice(matchNome[0].length).trim();
-  const palavras=norm(resto).replace(/\bde\b/g,' ').split(/\s+/).filter(Boolean);
+
+  // Estratégia: encontra a posição da keyword de pagamento mais à esquerda
+  // e usa tudo antes dela como nome
+  const KEYWORDS_PAG=/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/i;
+  const matchKw=linha.match(KEYWORDS_PAG);
+  if(!matchKw) return null;
+  const posKw=matchKw.index;
+  const nomeRaw=linha.slice(0,posKw).trim();
+  if(!nomeRaw) return null;
+  const nome=nomeRaw;
+  const resto=linha.slice(posKw+matchKw[0].length).trim();
+
+  // Tenta extrair produto + quantidade no resto
+  const palavras=norm(resto).replace(/\bde\b/g,' ').replace(/\bpix\b/g,' ').split(/\s+/).filter(Boolean);
+
+  // Procura qtd + produto
   for(let i=0;i<palavras.length;i++){
     const qtd=toNumero(palavras[i]);
     if(qtd===null) continue;
     if(i+2<palavras.length){const p2=toProduto(palavras[i+1]+' '+palavras[i+2]);if(p2) return{tipo:'produto',nome,qtd,produto:p2};}
     if(i+1<palavras.length){const p1=toProduto(palavras[i+1]);if(p1) return{tipo:'produto',nome,qtd,produto:p1};}
   }
+  // Só produto (sem qtd)
   for(let i=0;i<palavras.length;i++){
     if(i+1<palavras.length){const p2=toProduto(palavras[i]+' '+palavras[i+1]);if(p2) return{tipo:'produto',nome,qtd:1,produto:p2};}
     const p1=toProduto(palavras[i]);if(p1) return{tipo:'produto',nome,qtd:1,produto:p1};
   }
+  // Só valor monetário
   const valor=extrairValor(resto);
   if(valor&&valor>0) return{tipo:'valor',nome,valor};
   return null;
@@ -720,68 +812,76 @@ function parsearPagamento(linha) {
 function detectarComando(texto) {
   const t=norm(texto);
 
-  // Relatórios especiais (palavras-chave exatas primeiro)
+  // Comandos exatos de relatório
   if(t.includes('compras quitadas')||t==='quitadas') return{tipo:'quitadas'};
   if(t.includes('relatorio detalhado')||t.includes('relat\u00f3rio detalhado')) return{tipo:'detalhado'};
-
-  // Relatório geral (só a palavra, sem nome)
   if(t==='relatorio'||t==='relatorio geral'||t==='relat\u00f3rio'||t==='relat\u00f3rio geral') return{tipo:'geral'};
-
-  // Resumo do dia
   if(t==='resumo'||t==='resumo do dia'||t==='resumo diario') return{tipo:'resumo'};
+  if(t==='produtos'||t==='lista produtos'||t==='listar produtos') return{tipo:'produtos'};
+  if(t==='ajuda'||t==='!ajuda'||t==='help') return{tipo:'ajuda'};
 
-  // Relatorio com argumento: "relatorio julia" ou "relatorio junho"
-  // ─── FIX: verifica se o argumento é um mês ou um nome de cliente ───
-  const mRelArg=texto.match(/^relat[oó]rio\s+(.+)$/i);
+  // relatorio <argumento>: mês ou nome de cliente
+  const mRelArg=texto.match(/^relat[o\u00f3]rio\s+(.+)$/i);
   if(mRelArg){
     const arg=mRelArg[1].trim();
-    // Se o argumento for um mês válido → relatório do mês
     if(isMes(arg)) return{tipo:'mes',mes:arg};
-    // Caso contrário → saldo individual do cliente
     return{tipo:'individual',nome:arg};
   }
 
-  // Saldo individual
+  // saldo <nome>
   const mSaldo=texto.match(/^saldo\s+(.+)$/i);
   if(mSaldo) return{tipo:'individual',nome:mSaldo[1].trim()};
 
-  // Historico cliente
-  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[oó]rico\s+(.+)$/i);
+  // historico <nome>
+  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[o\u00f3]rico\s+(.+)$/i);
   if(mHist) return{tipo:'historico',nome:mHist[1].trim()};
 
-  // Cancelar
+  // cancelar <nome>
   const mCancel=texto.match(/^cancelar\s+(.+)$/i);
   if(mCancel) return{tipo:'cancelar',nome:mCancel[1].trim()};
 
-  // Mudar preco
-  const mPreco=texto.match(/^pre[cç]o\s+(\S+)\s+(.+)$/i);
+  // zerar <nome>
+  const mZerar=texto.match(/^zerar\s+(.+)$/i);
+  if(mZerar) return{tipo:'zerar',nome:mZerar[1].trim()};
+
+  // preco <produto> <valor>
+  const mPreco=texto.match(/^pre[c\u00e7]o\s+(\S+)\s+(.+)$/i);
   if(mPreco){
     const val=extrairValor(mPreco[2]);
     if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};
   }
 
-  // Novo produto
+  // novo produto <nome> <valor>
   const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-z\u00e0-\u00fc\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
   if(mNovoProd){
     const val=extrairValor(mNovoProd[2]);
     if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};
   }
 
-  // Lembrete manual
+  // lembrete manual
   if(t==='cobrar'||t==='lembrete'||t==='lembretes') return{tipo:'lembrete'};
 
   return{tipo:null};
 }
 
+// ─── AJUDA ────────────────────────────────────────────────────────────────────
+function gerarAjuda() {
+  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pagou 2 trufas_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ — dívidas em aberto\n_relatorio detalhado_ — com histórico\n_relatorio julia_ — saldo de um cliente\n_relatorio junho_ — relatório do mês\n_compras quitadas_ — clientes quitados\n_historico julia_ — histórico completo\n_resumo_ — resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ — lista produtos e preços\n_preco trufa 6_ — muda preço\n_novo produto brownie 8_ — novo produto\n_cancelar julia_ — cancela último lançamento\n_zerar julia_ — zera dívida de um cliente\n_lembrete_ — envia cobranças manualmente`;
+}
+
 // ─── AGENDAMENTOS ─────────────────────────────────────────────────────────────
 function agendarTarefas(sock, jid) {
+  // FIX: garante que só executa uma vez mesmo após reconexão
+  if(agendamentosIniciados) return;
+  agendamentosIniciados=true;
+  console.log('Agendamentos iniciados.');
   setInterval(async()=>{
     try {
       const now=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Sao_Paulo'}));
       const hora=now.getHours();
       const min=now.getMinutes();
       if(min>=0&&min<5){
-        if(hora===HORA_RESUMO) {
+        if(hora===HORA_RESUMO){
           const resumo=await gerarResumoDiario();
           await sock.sendMessage(jid,{text:resumo});
         }
@@ -827,6 +927,7 @@ async function iniciarBot() {
         botConectado=true;qrCodeData=null;reconectando=false;
         console.log('\u2705 Bot conectado!');
         salvarSessaoNoRender();
+        // FIX: agendarTarefas só dispara se já temos o jid do grupo
         if(jidGrupoGlobal) agendarTarefas(sock,jidGrupoGlobal);
       }
     });
@@ -842,8 +943,8 @@ async function iniciarBot() {
 
           if(!jidGrupoGlobal){
             jidGrupoGlobal=jid;
+            // FIX: agendarTarefas com flag — não duplica em reconexão
             agendarTarefas(sock,jid);
-            console.log('Grupo detectado, agendamentos iniciados.');
           }
 
           let texto=null;
@@ -861,6 +962,9 @@ async function iniciarBot() {
           if(cmd.tipo==='individual'){ await sock.sendMessage(jid,{text:await gerarSaldoIndividual(cmd.nome)});continue; }
           if(cmd.tipo==='historico'){ await sock.sendMessage(jid,{text:await gerarHistoricoCliente(cmd.nome)});continue; }
           if(cmd.tipo==='cancelar'){ await sock.sendMessage(jid,{text:await cancelarLancamento(jid,cmd.nome)});continue; }
+          if(cmd.tipo==='zerar'){ await sock.sendMessage(jid,{text:await zerarCliente(cmd.nome)});continue; }
+          if(cmd.tipo==='produtos'){ await sock.sendMessage(jid,{text:listarProdutos()});continue; }
+          if(cmd.tipo==='ajuda'){ await sock.sendMessage(jid,{text:gerarAjuda()});continue; }
           if(cmd.tipo==='lembrete'){ await verificarLembretes(sock,jid);continue; }
           if(cmd.tipo==='mudarpreco'){
             await sock.sendMessage(jid,{text:mudarPreco(cmd.produto,cmd.valor)});continue;
@@ -873,6 +977,7 @@ async function iniciarBot() {
           const respostas=[];
 
           for(const linha of linhas){
+            // Pagamento tem prioridade sobre compra
             const pagamento=parsearPagamento(linha);
             if(pagamento){
               const result=pagamento.tipo==='valor'
@@ -892,8 +997,9 @@ async function iniciarBot() {
                 linhasResposta.push(`\u26a0\ufe0f *${resultado.cliente}* atingiu o limite de cr\u00e9dito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}! (atual: R$ ${resultado.totalAtual.toFixed(2)})`);
               } else {
                 pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:(PRECOS[item.produto]||0)*item.quantidade});
-                const emoji=item.produto==='bolo'?'\ud83c\udf82 Bolo':item.produto==='trufa'?'\ud83c\udf6b Trufa':'\ud83d\udee4 '+capitalizarNome(item.produto);
-                linhasResposta.push(`${emoji}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+                const emoji=emojiProduto(item.produto);
+                const nomeProd=nomeProdutoExib(item.produto);
+                linhasResposta.push(`${emoji} ${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
               }
             }
             if(linhasResposta.length) respostas.push(`*${parsed.nome}*\n`+linhasResposta.join('\n'));
