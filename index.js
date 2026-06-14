@@ -29,7 +29,6 @@ function salvarPrecos() { try { fs.writeFileSync(PRECOS_FILE, JSON.stringify(PRE
 
 const LIMITE_CREDITO_PADRAO = parseFloat(process.env.LIMITE_CREDITO || '0');
 
-// FIX: 'fruta'/'frutas' removidos definitivamente dos sinonimos de trufa
 const SINONIMOS = {
   trufa: ['trufa','trufas','trufinha','trufinhas','bombom','bombons'],
   bolo:  ['bolo','bolos','bolinho','bolinhos','bolo de pote','bolo pote']
@@ -66,8 +65,15 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
+// ─── NORMALIZAÇÃO ─────────────────────────────────────────────────────────────
 function norm(t) {
-  return (t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  // Remove caracteres invisíveis do WhatsApp (zero-width, etc) e normaliza
+  return (t||'')
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .trim();
 }
 
 // ─── FUZZY MATCH ─────────────────────────────────────────────────────────────
@@ -91,6 +97,7 @@ function nomesFuzzyIguais(digitado, cadastrado) {
   return true;
 }
 function resolverNome(digitado, nomesConhecidos) {
+  if(!digitado||!nomesConhecidos||!nomesConhecidos.length) return null;
   const nd=norm(digitado);
   for(const c of nomesConhecidos) if(norm(c)===nd) return c;
   for(const c of nomesConhecidos) if(nomesFuzzyIguais(digitado,c)) return c;
@@ -112,27 +119,38 @@ function todosOsSinonimos() {
 
 function toProduto(trecho) {
   const n=norm(trecho);
+  if(!n) return null;
   for(const [produto,sins] of Object.entries(todosOsSinonimos()))
     for(const sin of sins)
       if(n===norm(sin)) return produto;
   return null;
 }
 
+// ─── EXTRAIR VALOR MONETÁRIO ──────────────────────────────────────────────────
+// Suporta: 10 | 10 reais | R$10 | R$ 10 | 10,50 | 10.50 | pix de 10
 function extrairValor(texto) {
-  // Remove prefixos comuns antes de extrair o número
-  const t=norm(texto)
-    .replace(/r\$\s*/g,'')
-    .replace(/\breais\b/g,'')
-    .replace(/\bpix\b/g,'')
-    .replace(/\bde\b/g,'')
+  if(!texto) return null;
+  const t = norm(texto)
+    .replace(/r\$\s*/g,' ')
+    .replace(/\breais\b/g,' ')
+    .replace(/\bpix\b/g,' ')
+    .replace(/\bde\b/g,' ')
+    .replace(/\btransferiu\b/g,' ')
+    .replace(/\bdepositou\b/g,' ')
+    .replace(/\bmandou\b/g,' ')
+    .replace(/\benviou\b/g,' ')
+    .replace(/\bpagou\b/g,' ')
     .trim();
-  const m=t.match(/(\d+[,.]?\d*)/);
+  // Aceita número com vírgula ou ponto decimal
+  const m = t.match(/(\d+[,.]?\d*)/);
   if(!m) return null;
-  return parseFloat(m[1].replace(',','.'));
+  const val = parseFloat(m[1].replace(',','.'));
+  return isNaN(val) ? null : val;
 }
 
 function agora() { return new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
 function capitalizarNome(n) {
+  if(!n) return '';
   return n.trim().split(' ').map(p=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join(' ');
 }
 function emojiProduto(produto) {
@@ -150,7 +168,6 @@ let botConectado=false;
 let qrCodeData=null;
 let sockGlobal=null;
 let jidGrupoGlobal=null;
-// FIX: flag para evitar agendarTarefas duplo em reconexão
 let agendamentosIniciados=false;
 
 function restaurarSessao() {
@@ -322,25 +339,27 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
+    const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
+    const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
-    const cliente=row?row.get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!row) return{ok:false,msg:`\u274c Nenhuma d\u00edvida de *${cliente}* com ${nomeProdutoExib(produto)} encontrada.`};
+    const cliente=nomeCanon||row?row.get('Cliente'):capitalizarNome(clienteEnviado);
+    if(!row) return{ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
     const qtdPaga   = Math.min(quantidade,qtdAtual);
     const novaQtd   = qtdAtual-qtdPaga;
     const totalAtual= parseFloat(row.get('Total')||'0');
     const pago = qtdAtual>0 ? (totalAtual/qtdAtual)*qtdPaga : 0;
-    if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto,quantidade:qtdPaga,valor:pago});
-    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
+    if(jid) pushLancamento(jid,{tipo:'pagamento',cliente:row.get('Cliente'),produto,quantidade:qtdPaga,valor:pago});
+    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
     if(novaQtd===0){
       await row.delete();
-      return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
+      return{ok:true,msg:`\u2705 *${row.get('Cliente')}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
     }
     const novoTotal=totalAtual-pago;
     row.set('Quantidade',novaQtd);
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
-    return{ok:true,msg:`\u2705 *${cliente}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
+    return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
   } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
@@ -349,9 +368,14 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
-    const rowsCliente=rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
+    // Busca fuzzy para encontrar o cliente mesmo com erro de digitação
+    const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
+    const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
+    const rowsCliente=nomeCanon
+      ? rows.filter(r=>r.get('Cliente')===nomeCanon)
+      : rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
     const cliente=rowsCliente.length?rowsCliente[0].get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!rowsCliente.length) return{ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${cliente}*.`};
+    if(!rowsCliente.length) return{ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
     const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
@@ -716,7 +740,7 @@ async function zerarCliente(nomeDigitado) {
   } catch(err){console.error('Erro zerar:',err.message);return '\u274c Erro ao zerar cliente.';}
 }
 
-// ─── PARSER DE LINHA ──────────────────────────────────────────────────────────
+// ─── PARSER DE LINHA (COMPRAS) ────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -763,58 +787,77 @@ function parsearLinha(linha) {
 // Reconhece: pagou, pix, transferiu, depositou, mandou, enviou
 // Formatos:  julia pagou 10 | julia pix 10 | julia pagou 10 reais | julia pix de 10
 //            julia pagou R$10 | julia pagou 10,50 | julia pagou 2 trufas
+//            julia transferiu 15 | julia mandou 20 reais | julia enviou pix de 10
 function parsearPagamento(linha) {
-  const t = norm(linha);
-  // Deve conter palavra-chave de pagamento
-  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(t)) return null;
+  // Normaliza mas mantém o texto original para extrair o nome com capitalização correta
+  const tNorm = norm(linha);
 
-  // Encontra posição da keyword mais à esquerda
-  const KEYWORDS_PAG = /\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/i;
-  const matchKw = linha.match(KEYWORDS_PAG);
-  if (!matchKw) return null;
+  // Verifica se tem palavra-chave de pagamento
+  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
 
-  const posKw  = matchKw.index;
-  const nomeRaw = linha.slice(0, posKw).trim();
-  if (!nomeRaw) return null;
+  // Encontra a keyword na versão normalizada para pegar posição correta
+  const kwMatch = tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);
+  if (!kwMatch) return null;
 
-  const nome  = nomeRaw;
-  const resto = linha.slice(posKw + matchKw[0].length).trim();
+  const posKw = kwMatch.index;
+  const keyword = kwMatch[1];
 
-  // Limpa o resto: remove palavras de controle comuns
-  const palavras = norm(resto)
+  // Extrai o nome bruto ANTES da keyword (usando posição na string normalizada)
+  // mas preserva capitalização original usando a linha original
+  // Estratégia: contar palavras antes da keyword
+  const palavrasNorm = tNorm.split(/\s+/).filter(Boolean);
+  const palavrasOrig = linha.trim().split(/\s+/).filter(Boolean);
+  let kwIdx = -1;
+  for(let i=0;i<palavrasNorm.length;i++){
+    if(palavrasNorm[i]===keyword){ kwIdx=i; break; }
+  }
+  if(kwIdx<=0) return null; // sem nome antes da keyword
+
+  const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
+  if(!nomeRaw) return null;
+
+  // Nome capitalizado
+  const nome = capitalizarNome(nomeRaw);
+
+  // Pega tudo DEPOIS da keyword para analisar o que foi pago
+  const restoNorm = palavrasNorm.slice(kwIdx+1).join(' ').trim();
+  const restoOrig = palavrasOrig.slice(kwIdx+1).join(' ').trim();
+
+  // Limpa palavras de controle do resto normalizado
+  const palavrasResto = restoNorm
     .replace(/\bde\b/g, ' ')
     .replace(/\bpix\b/g, ' ')
     .replace(/\breais\b/g, ' ')
     .replace(/\br\$\s*/g, ' ')
     .split(/\s+/).filter(Boolean);
 
-  // 1. Tenta qtd + produto (ex: 2 trufas)
-  for (let i = 0; i < palavras.length; i++) {
-    const qtd = toNumero(palavras[i]);
+  // 1. Tenta qtd + produto (ex: 2 trufas, duas trufas)
+  for (let i = 0; i < palavrasResto.length; i++) {
+    const qtd = toNumero(palavrasResto[i]);
     if (qtd === null) continue;
-    if (i + 2 < palavras.length) {
-      const p2 = toProduto(palavras[i+1] + ' ' + palavras[i+2]);
+    if (i + 2 < palavrasResto.length) {
+      const p2 = toProduto(palavrasResto[i+1] + ' ' + palavrasResto[i+2]);
       if (p2) return { tipo: 'produto', nome, qtd, produto: p2 };
     }
-    if (i + 1 < palavras.length) {
-      const p1 = toProduto(palavras[i+1]);
+    if (i + 1 < palavrasResto.length) {
+      const p1 = toProduto(palavrasResto[i+1]);
       if (p1) return { tipo: 'produto', nome, qtd, produto: p1 };
     }
   }
 
-  // 2. Tenta só produto sem qtd (ex: pagou trufa)
-  for (let i = 0; i < palavras.length; i++) {
-    if (i + 1 < palavras.length) {
-      const p2 = toProduto(palavras[i] + ' ' + palavras[i+1]);
+  // 2. Tenta só produto sem qtd (ex: pagou trufa, pagou bombom)
+  for (let i = 0; i < palavrasResto.length; i++) {
+    if (i + 1 < palavrasResto.length) {
+      const p2 = toProduto(palavrasResto[i] + ' ' + palavrasResto[i+1]);
       if (p2) return { tipo: 'produto', nome, qtd: 1, produto: p2 };
     }
-    const p1 = toProduto(palavras[i]);
+    const p1 = toProduto(palavrasResto[i]);
     if (p1) return { tipo: 'produto', nome, qtd: 1, produto: p1 };
   }
 
-  // 3. Tenta valor monetário (ex: pagou 10, pix de 10, pagou R$10,50)
-  const valor = extrairValor(resto);
-  if (valor && valor > 0) return { tipo: 'valor', nome, valor };
+  // 3. Tenta valor monetário (ex: pagou 10, pix de 10, pagou R$10,50, pix 7)
+  const valor = extrairValor(restoOrig);
+  if (valor !== null && valor > 0) return { tipo: 'valor', nome, valor };
 
   return null;
 }
@@ -830,7 +873,7 @@ function detectarComando(texto) {
   if(t==='produtos'||t==='lista produtos'||t==='listar produtos') return{tipo:'produtos'};
   if(t==='ajuda'||t==='!ajuda'||t==='help') return{tipo:'ajuda'};
 
-  const mRelArg=texto.match(/^relat[o\u00f3]rio\s+(.+)$/i);
+  const mRelArg=texto.match(/^relat[oó]rio\s+(.+)$/i);
   if(mRelArg){
     const arg=mRelArg[1].trim();
     if(isMes(arg)) return{tipo:'mes',mes:arg};
@@ -840,7 +883,7 @@ function detectarComando(texto) {
   const mSaldo=texto.match(/^saldo\s+(.+)$/i);
   if(mSaldo) return{tipo:'individual',nome:mSaldo[1].trim()};
 
-  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[o\u00f3]rico\s+(.+)$/i);
+  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[oó]rico\s+(.+)$/i);
   if(mHist) return{tipo:'historico',nome:mHist[1].trim()};
 
   const mCancel=texto.match(/^cancelar\s+(.+)$/i);
@@ -849,13 +892,13 @@ function detectarComando(texto) {
   const mZerar=texto.match(/^zerar\s+(.+)$/i);
   if(mZerar) return{tipo:'zerar',nome:mZerar[1].trim()};
 
-  const mPreco=texto.match(/^pre[c\u00e7]o\s+(\S+)\s+(.+)$/i);
+  const mPreco=texto.match(/^pre[cç]o\s+(\S+)\s+(.+)$/i);
   if(mPreco){
     const val=extrairValor(mPreco[2]);
     if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};
   }
 
-  const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-z\u00e0-\u00fc\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
+  const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-zà-ü\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
   if(mNovoProd){
     const val=extrairValor(mNovoProd[2]);
     if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};
@@ -868,7 +911,7 @@ function detectarComando(texto) {
 
 // ─── AJUDA ────────────────────────────────────────────────────────────────────
 function gerarAjuda() {
-  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico completo\n_resumo_ \u2014 resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ \u2014 lista produtos e pre\u00e7os\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_novo produto brownie 8_ \u2014 novo produto\n_cancelar julia_ \u2014 cancela \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida de um cliente\n_lembrete_ \u2014 envia cobran\u00e7as manualmente`;
+  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n_julia transferiu 15_\n_julia mandou 20 reais_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico completo\n_resumo_ \u2014 resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ \u2014 lista produtos e pre\u00e7os\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_novo produto brownie 8_ \u2014 novo produto\n_cancelar julia_ \u2014 cancela \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida de um cliente\n_lembrete_ \u2014 envia cobran\u00e7as manualmente`;
 }
 
 // ─── AGENDAMENTOS ─────────────────────────────────────────────────────────────
@@ -979,11 +1022,13 @@ async function iniciarBot() {
             // Pagamento tem prioridade sobre compra
             const pagamento=parsearPagamento(linha);
             if(pagamento){
-              const result=pagamento.tipo==='valor'
-                ?await processarPagamentoValor(pagamento.nome,pagamento.valor,jid)
-                :await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
-              if(result.ok) respostas.push(result.msg);
-              else respostas.push(result.msg);
+              let result;
+              if(pagamento.tipo==='valor'){
+                result=await processarPagamentoValor(pagamento.nome,pagamento.valor,jid);
+              } else {
+                result=await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
+              }
+              respostas.push(result.msg);
               continue;
             }
 
