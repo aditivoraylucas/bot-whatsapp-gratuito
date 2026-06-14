@@ -49,7 +49,6 @@ function toNumero(palavra) {
   return NUMEROS_EXTENSO[n] ?? null;
 }
 
-// Correspondencia EXATA apenas - sem fallback includes
 function toProduto(trecho) {
   const n = norm(trecho);
   for (const [produto, sins] of Object.entries(SINONIMOS))
@@ -202,82 +201,72 @@ async function processarPagamentoValor(clienteEnviado, valorPago) {
       const totalRow = parseFloat(r.get('Total') || '0');
       const preco = PRECOS[r.get('Produto')] || 5;
       if (restante >= totalRow) { restante -= totalRow; await r.delete(); }
-      else { r.set('Total', (totalRow - restante).toFixed(2)); r.set('Quantidade', Math.ceil((totalRow - restante) / preco)); await r.save(); restante = 0; }
+      else {
+        const novoTotal = totalRow - restante;
+        r.set('Total', novoTotal.toFixed(2));
+        r.set('Quantidade', Math.ceil(novoTotal / preco));
+        await r.save();
+        restante = 0;
+      }
     }
-    return { ok: true, msg: `\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido - valorPago).toFixed(2)}` };
+    const saldoRestante = totalDevido - valorPago;
+    return { ok: true, msg: `\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${saldoRestante.toFixed(2)}` };
   } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
+/**
+ * Relatorio usa EXCLUSIVAMENTE a aba Saldo como fonte de verdade.
+ * O saldo ja reflete todos os pagamentos realizados (reducoes feitas em tempo real).
+ * Isso garante que o relatorio esteja sempre atualizado e correto.
+ */
 async function gerarRelatorioGeral() {
   try {
-    const doc = await getDoc();
-    const rowsSaldo = await doc.sheetsByIndex[0].getRows();
-    let rowsHist = [];
-    if (doc.sheetCount >= 2) {
-      const sh = doc.sheetsByIndex[1];
-      try { await sh.loadHeaderRow(); rowsHist = await sh.getRows(); } catch(e) {}
-    }
-    if (!rowsSaldo.length && !rowsHist.length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
-    const hist = {};
-    for (const row of rowsHist) {
+    const sheet = await getSheetSaldo();
+    const rows = await sheet.getRows();
+
+    if (!rows.length) return '\ud83d\udcca Nenhuma d\u00edvida em aberto no momento.';
+
+    // Agrupa por cliente
+    const clientes = {};
+    for (const row of rows) {
       const nome = (row.get('Cliente') || '').trim();
-      const tipo = (row.get('Tipo') || '').trim();
-      const valor = parseFloat(row.get('Valor') || '0');
-      const qtd = row.get('Quantidade');
-      const produto = (row.get('Produto') || '').trim();
-      if (!nome) continue;
-      if (!hist[nome]) hist[nome] = { totalComprado: 0, totalPago: 0, itensComprados: {} };
-      if (tipo === 'Compra') {
-        hist[nome].totalComprado += valor;
-        if (!hist[nome].itensComprados[produto]) hist[nome].itensComprados[produto] = 0;
-        hist[nome].itensComprados[produto] += parseInt(qtd) || 0;
-      } else if (tipo === 'Pagamento') hist[nome].totalPago += valor;
-    }
-    const saldos = {};
-    for (const row of rowsSaldo) {
-      const nome = (row.get('Cliente') || '').trim();
+      const produto = norm(row.get('Produto') || '');
+      const quantidade = parseInt(row.get('Quantidade') || '0');
       const total = parseFloat(row.get('Total') || '0');
-      if (!nome) continue;
-      if (!saldos[nome]) saldos[nome] = 0;
-      saldos[nome] += total;
+      if (!nome || !produto) continue;
+      if (!clientes[nome]) clientes[nome] = { itens: [], totalDevido: 0 };
+      clientes[nome].itens.push({ produto, quantidade, total });
+      clientes[nome].totalDevido += total;
     }
-    const todosClientes = new Set([...Object.keys(hist), ...Object.keys(saldos)]);
-    let resposta = '\ud83d\udcca *Relat\u00f3rio Geral*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+
+    if (!Object.keys(clientes).length) return '\ud83d\udcca Nenhuma d\u00edvida em aberto no momento.';
+
+    // Ordena por maior devedor
+    const ordenados = Object.entries(clientes).sort((a, b) => b[1].totalDevido - a[1].totalDevido);
+
+    let resposta = '\ud83d\udcca *Relat\u00f3rio de D\u00edvidas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral = 0;
-    for (const nome of todosClientes) {
-      const h = hist[nome] || { totalComprado: 0, totalPago: 0, itensComprados: {} };
-      const saldo = saldos[nome] || 0;
+
+    for (const [nome, dados] of ordenados) {
       resposta += `\n\ud83d\udc64 *${nome}*\n`;
-      for (const [prod, qtd] of Object.entries(h.itensComprados))
-        resposta += `   ${prod === 'bolo' ? '\ud83c\udf82 Bolo' : '\ud83c\udf6b Trufa'}: ${qtd} comprados\n`;
-      resposta += `   \ud83d\uded2 Total comprado: R$ ${h.totalComprado.toFixed(2)}\n`;
-      if (h.totalPago > 0) resposta += `   \u2705 Total pago: R$ ${h.totalPago.toFixed(2)}\n`;
-      resposta += `   \ud83d\udcb0 *Saldo devedor: R$ ${saldo.toFixed(2)}*\n`;
-      totalGeral += saldo;
+      for (const item of dados.itens) {
+        const emoji = item.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+        const nomeProduto = item.produto === 'bolo' ? 'Bolo' : 'Trufa';
+        resposta += `   ${emoji} ${nomeProduto}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
+      }
+      resposta += `   \ud83d\udcb0 *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
+      totalGeral += dados.totalDevido;
     }
-    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL GERAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+
+    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
-  } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
+  } catch (err) {
+    console.error('Erro relatorio:', err.message);
+    return '\u274c Erro ao gerar relat\u00f3rio.';
+  }
 }
 
-/**
- * parsearLinha - extrai nome + lista de itens de uma linha de texto.
- *
- * REGRAS:
- *  1. Numero (digito ou extenso) ANTES do produto => quantidade explicita
- *  2. Produto SEM numero antes => quantidade = 1 (nova regra)
- *  3. Conectores (e, mais, +, virgula) sao ignorados
- *  4. Tudo que vem antes do primeiro produto encontrado = nome do cliente
- *
- * Exemplos:
- *  "julia bolo 3 trufas"         => Julia | [{1,bolo},{3,trufa}]
- *  "julia um bolo e 3 trufas"    => Julia | [{1,bolo},{3,trufa}]
- *  "julia 1 bolo 3 trufas"       => Julia | [{1,bolo},{3,trufa}]
- *  "julia bolo trufa"            => Julia | [{1,bolo},{1,trufa}]
- *  "julia 2 trufas bolo"         => Julia | [{2,trufa},{1,bolo}]
- */
 function parsearLinha(linha) {
-  // Normaliza conectores e espacos
   const limpa = linha
     .replace(/,/g, ' ')
     .replace(/\b(mais|e|de)\b/gi, ' ')
@@ -289,14 +278,10 @@ function parsearLinha(linha) {
   const palavrasNorm = palavrasOrig.map(norm);
   const n = palavrasNorm.length;
 
-  // Acha o indice do primeiro produto OU primeiro numero seguido de produto
-  // para determinar onde termina o nome
   let inicioItens = -1;
   for (let i = 0; i < n; i++) {
-    // Caso 1: palavra atual e produto (sem numero antes => qtd=1)
     const p1 = toProduto(palavrasNorm[i]);
     if (p1) { inicioItens = i; break; }
-    // Caso 2: palavra atual e numero e proxima(s) e produto
     const qtd = toNumero(palavrasNorm[i]);
     if (qtd !== null && i + 1 < n) {
       const ok2 = i + 2 < n && toProduto(palavrasNorm[i+1] + ' ' + palavrasNorm[i+2]);
@@ -305,19 +290,16 @@ function parsearLinha(linha) {
     }
   }
 
-  if (inicioItens < 1) return null; // sem nome ou nada reconhecido
+  if (inicioItens < 1) return null;
 
   const nomeRaw = palavrasOrig.slice(0, inicioItens).join(' ').trim();
   if (!nomeRaw) return null;
 
-  // Percorre a partir de inicioItens coletando pares [qtd? + produto]
   const itens = [];
   let i = inicioItens;
   while (i < n) {
-    // Tenta: numero seguido de produto
     const qtd = toNumero(palavrasNorm[i]);
     if (qtd !== null && i + 1 < n) {
-      // Tenta 2 palavras de produto ("bolo de pote")
       if (i + 2 < n) {
         const p2 = toProduto(palavrasNorm[i+1] + ' ' + palavrasNorm[i+2]);
         if (p2) { itens.push({ quantidade: qtd, produto: p2 }); i += 3; continue; }
@@ -325,15 +307,12 @@ function parsearLinha(linha) {
       const p1 = toProduto(palavrasNorm[i+1]);
       if (p1) { itens.push({ quantidade: qtd, produto: p1 }); i += 2; continue; }
     }
-
-    // Tenta: produto sozinho (sem numero) => quantidade = 1
     if (i + 1 < n) {
       const p2 = toProduto(palavrasNorm[i] + ' ' + palavrasNorm[i+1]);
       if (p2) { itens.push({ quantidade: 1, produto: p2 }); i += 2; continue; }
     }
     const p1 = toProduto(palavrasNorm[i]);
     if (p1) { itens.push({ quantidade: 1, produto: p1 }); i += 1; continue; }
-
     i++;
   }
 
@@ -361,7 +340,6 @@ function parsearPagamento(linha) {
       if (p1) return { tipo: 'produto', nome, qtd, produto: p1 };
     }
   }
-  // Produto sem numero => qtd = 1
   for (let i = 0; i < palavras.length; i++) {
     if (i + 1 < palavras.length) {
       const p2 = toProduto(palavras[i] + ' ' + palavras[i+1]);
