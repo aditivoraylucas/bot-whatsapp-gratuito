@@ -41,7 +41,54 @@ function norm(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
-function mesmoNome(a, b) { return norm(a) === norm(b); }
+// ─── FUZZY MATCH DE NOMES ────────────────────────────────────────────────────
+// Distancia de Levenshtein entre duas strings
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+  return dp[m][n];
+}
+
+// Compara palavra a palavra: cada palavra do digitado deve ter um par proximo
+// na lista de palavras do nome cadastrado, e vice-versa.
+// Regra: tolerancia de 1 erro por palavra curta (<=5 letras) e 2 erros para longas.
+// Se os nomes tiverem palavras diferentes (julia prado vs julia gomes), nao bate.
+function nomesFuzzyIguais(digitado, cadastrado) {
+  const na = norm(digitado).split(/\s+/).filter(Boolean);
+  const nb = norm(cadastrado).split(/\s+/).filter(Boolean);
+  // Quantidade de palavras diferente => nomes diferentes (julia prado != julia gomes)
+  if (na.length !== nb.length) return false;
+  // Cada palavra de na deve ter correspondencia proxima em nb (na mesma posicao)
+  for (let i = 0; i < na.length; i++) {
+    const wa = na[i], wb = nb[i];
+    const maxLen = Math.max(wa.length, wb.length);
+    const tolerancia = maxLen <= 5 ? 1 : 2;
+    if (levenshtein(wa, wb) > tolerancia) return false;
+  }
+  return true;
+}
+
+// Busca o nome canonico cadastrado que melhor bate com o nome digitado
+function resolverNome(digitado, nomesConhecidos) {
+  const nd = norm(digitado);
+  // Primeiro tenta match exato
+  for (const c of nomesConhecidos) if (norm(c) === nd) return c;
+  // Depois tenta fuzzy
+  for (const c of nomesConhecidos) if (nomesFuzzyIguais(digitado, c)) return c;
+  return null;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+function mesmoNome(a, b) {
+  if (norm(a) === norm(b)) return true;
+  return nomesFuzzyIguais(a, b);
+}
 
 function toNumero(palavra) {
   const n = norm(palavra);
@@ -145,6 +192,7 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const sheet = await getSheetSaldo();
     const rows = await sheet.getRows();
+    // Usa fuzzy para achar linha existente
     const existente = rows.find(r => mesmoNome(r.get('Cliente'), clienteEnviado) && norm(r.get('Produto')) === norm(produto));
     const cliente = existente ? existente.get('Cliente') : capitalizarNome(clienteEnviado);
     const total = (PRECOS[produto] || 0) * quantidade;
@@ -214,7 +262,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago) {
   } catch (err) { return { ok: false, msg: '\u274c Erro ao registrar pagamento.' }; }
 }
 
-// Relatorio Geral: fonte de verdade = aba Saldo (saldo atual ja reflete pagamentos)
+// ─── RELATORIO GERAL (so devedores, resumido) ────────────────────────────────
 async function gerarRelatorioGeral() {
   try {
     const sheet = await getSheetSaldo();
@@ -250,46 +298,61 @@ async function gerarRelatorioGeral() {
   } catch (err) { console.error('Erro relatorio:', err.message); return '\u274c Erro ao gerar relat\u00f3rio.'; }
 }
 
-// Relatorio Detalhado: le o Historico completo e mostra cada movimentacao com data
+// ─── HELPER: carrega historico agrupado por nome canonico ────────────────────
+async function carregarHistoricoAgrupado() {
+  const doc = await getDoc();
+  const rowsSaldo = await doc.sheetsByIndex[0].getRows();
+  // Monta mapa de saldos atuais (nome canonico => total)
+  const saldos = {};
+  for (const row of rowsSaldo) {
+    const nome = (row.get('Cliente') || '').trim();
+    const total = parseFloat(row.get('Total') || '0');
+    if (!nome) continue;
+    if (!saldos[nome]) saldos[nome] = 0;
+    saldos[nome] += total;
+  }
+  if (doc.sheetCount < 2) return { historico: {}, saldos };
+  const sheetHist = doc.sheetsByIndex[1];
+  try { await sheetHist.loadHeaderRow(); } catch(e) { return { historico: {}, saldos }; }
+  const rowsHist = await sheetHist.getRows();
+  // Lista de nomes canonicos conhecidos (da aba Saldo + Historico)
+  const nomesCanonicos = [...Object.keys(saldos)];
+  // Agrupa historico resolvendo nome digitado para o canonico
+  const historico = {};
+  for (const row of rowsHist) {
+    const nomeRaw = (row.get('Cliente') || '').trim();
+    if (!nomeRaw) continue;
+    // Resolve para nome canonico (se ja esta no historico, usa direto)
+    let nomeCanon = resolverNome(nomeRaw, nomesCanonicos);
+    if (!nomeCanon) {
+      // Nome novo que ainda nao esta na lista => adiciona e usa
+      nomesCanonicos.push(nomeRaw);
+      nomeCanon = nomeRaw;
+    }
+    if (!historico[nomeCanon]) historico[nomeCanon] = [];
+    historico[nomeCanon].push({
+      data:    (row.get('Data') || '').trim(),
+      tipo:    (row.get('Tipo') || '').trim(),
+      produto: norm(row.get('Produto') || ''),
+      qtd:     (row.get('Quantidade') || '').trim(),
+      valor:   parseFloat(row.get('Valor') || '0')
+    });
+  }
+  return { historico, saldos };
+}
+
+// ─── RELATORIO DETALHADO (so quem ainda tem divida) ──────────────────────────
 async function gerarRelatorioDetalhado() {
   try {
-    const doc = await getDoc();
-    // Saldo atual por cliente
-    const rowsSaldo = await doc.sheetsByIndex[0].getRows();
-    const saldos = {};
-    for (const row of rowsSaldo) {
-      const nome = (row.get('Cliente') || '').trim();
-      const total = parseFloat(row.get('Total') || '0');
-      if (!nome) continue;
-      if (!saldos[nome]) saldos[nome] = 0;
-      saldos[nome] += total;
-    }
-    // Historico
-    if (doc.sheetCount < 2) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
-    const sheetHist = doc.sheetsByIndex[1];
-    try { await sheetHist.loadHeaderRow(); } catch(e) { return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.'; }
-    const rowsHist = await sheetHist.getRows();
-    if (!rowsHist.length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
-    // Agrupa movimentacoes por cliente
-    const historico = {};
-    for (const row of rowsHist) {
-      const nome = (row.get('Cliente') || '').trim();
-      if (!nome) continue;
-      if (!historico[nome]) historico[nome] = [];
-      historico[nome].push({
-        data:     (row.get('Data') || '').trim(),
-        tipo:     (row.get('Tipo') || '').trim(),
-        produto:  norm(row.get('Produto') || ''),
-        qtd:      (row.get('Quantidade') || '').trim(),
-        valor:    parseFloat(row.get('Valor') || '0')
-      });
-    }
+    const { historico, saldos } = await carregarHistoricoAgrupado();
     if (!Object.keys(historico).length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
-    // Ordena clientes por maior saldo devedor atual
-    const nomesOrdenados = Object.keys(historico).sort((a, b) => (saldos[b] || 0) - (saldos[a] || 0));
+    // Filtra apenas quem tem saldo devedor > 0
+    const devedores = Object.keys(historico).filter(n => (saldos[n] || 0) > 0);
+    if (!devedores.length) return '\ud83c\udf89 Nenhuma d\u00edvida em aberto! Todos quitados.';
+    devedores.sort((a, b) => (saldos[b] || 0) - (saldos[a] || 0));
     let resposta = '\ud83d\udcdd *Relat\u00f3rio Detalhado*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral = 0;
-    for (const nome of nomesOrdenados) {
+    for (const nome of devedores) {
       const movs = historico[nome];
       const saldoAtual = saldos[nome] || 0;
       resposta += `\n\ud83d\udc64 *${nome}*\n`;
@@ -304,16 +367,71 @@ async function gerarRelatorioDetalhado() {
           resposta += `      \ud83d\udcc5 ${m.data}\n`;
         }
       }
-      if (saldoAtual > 0) {
-        resposta += `   \ud83d\udcb0 *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
-        totalGeral += saldoAtual;
-      } else {
-        resposta += `   \u2705 *Sem d\u00edvidas em aberto*\n`;
-      }
+      resposta += `   \ud83d\udcb0 *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
+      totalGeral += saldoAtual;
     }
     resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
   } catch (err) { console.error('Erro relatorio detalhado:', err.message); return '\u274c Erro ao gerar relat\u00f3rio detalhado.'; }
+}
+
+// ─── COMPRAS QUITADAS (so quem ja pagou tudo) ────────────────────────────────
+async function gerarRelatorioQuitados() {
+  try {
+    const { historico, saldos } = await carregarHistoricoAgrupado();
+    if (!Object.keys(historico).length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    // Filtra apenas quem tem saldo = 0 E aparece no historico (comprou algo)
+    const quitados = Object.keys(historico).filter(n => !(saldos[n] > 0));
+    if (!quitados.length) return '\ud83d\udcca Nenhum cliente quitado ainda.';
+    quitados.sort();
+    let resposta = '\ud83c\udf89 *Compras Quitadas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    for (const nome of quitados) {
+      const movs = historico[nome];
+      const totalComprado = movs.filter(m => m.tipo === 'Compra').reduce((s, m) => s + m.valor, 0);
+      const totalPago = movs.filter(m => m.tipo === 'Pagamento').reduce((s, m) => s + m.valor, 0);
+      resposta += `\n\ud83d\udc64 *${nome}*\n`;
+      for (const m of movs) {
+        if (m.tipo === 'Compra') {
+          const emoji = m.produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+          const nomeProd = m.produto === 'bolo' ? 'Bolo' : 'Trufa';
+          resposta += `   \ud83d\uded2 ${emoji} Compra: ${m.qtd}x ${nomeProd} = R$ ${m.valor.toFixed(2)}\n`;
+          resposta += `      \ud83d\udcc5 ${m.data}\n`;
+        } else if (m.tipo === 'Pagamento') {
+          resposta += `   \ud83d\udcb3 Pagamento: R$ ${m.valor.toFixed(2)}\n`;
+          resposta += `      \ud83d\udcc5 ${m.data}\n`;
+        }
+      }
+      resposta += `   \u2705 *Quitado | Total pago: R$ ${totalPago.toFixed(2)}*\n`;
+    }
+    resposta += `\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2705 *${quitados.length} cliente(s) com conta quitada*`;
+    return resposta;
+  } catch (err) { console.error('Erro relatorio quitados:', err.message); return '\u274c Erro ao gerar relat\u00f3rio de quitados.'; }
+}
+
+// ─── SALDO INDIVIDUAL ────────────────────────────────────────────────────────
+async function gerarSaldoIndividual(nomeDigitado) {
+  try {
+    const sheet = await getSheetSaldo();
+    const rows = await sheet.getRows();
+    const nomesConhecidos = [...new Set(rows.map(r => (r.get('Cliente') || '').trim()).filter(Boolean))];
+    const nomeCanon = resolverNome(nomeDigitado, nomesConhecidos);
+    if (!nomeCanon) return `\u274c Nenhuma movimenta\u00e7\u00e3o encontrada para *${capitalizarNome(nomeDigitado)}*.`;
+    const rowsCliente = rows.filter(r => r.get('Cliente') === nomeCanon);
+    if (!rowsCliente.length) return `\u2705 *${nomeCanon}* n\u00e3o tem d\u00edvidas em aberto.`;
+    let totalDevido = 0;
+    let resposta = `\ud83d\udc64 *${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    for (const row of rowsCliente) {
+      const produto = norm(row.get('Produto') || '');
+      const qtd = parseInt(row.get('Quantidade') || '0');
+      const total = parseFloat(row.get('Total') || '0');
+      const emoji = produto === 'bolo' ? '\ud83c\udf82' : '\ud83c\udf6b';
+      const nomeProd = produto === 'bolo' ? 'Bolo' : 'Trufa';
+      resposta += `${emoji} ${nomeProd}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
+      totalDevido += total;
+    }
+    resposta += `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb0 *Total devido: R$ ${totalDevido.toFixed(2)}*`;
+    return resposta;
+  } catch (err) { return '\u274c Erro ao consultar saldo.'; }
 }
 
 function parsearLinha(linha) {
@@ -397,12 +515,17 @@ function parsearPagamento(linha) {
   return null;
 }
 
-// Detecta qual relatorio foi pedido
-function tipoRelatorio(texto) {
+// ─── DETECTA COMANDO ─────────────────────────────────────────────────────────
+// Retorna: { tipo: 'quitadas'|'detalhado'|'geral'|'individual'|null, nome? }
+function detectarComando(texto) {
   const t = norm(texto);
-  if (t.includes('relatorio detalhado') || t.includes('relatorio detalhado')) return 'detalhado';
-  if (t.includes('relatorio') || t.includes('saldo') || t.includes('relatorio geral')) return 'geral';
-  return null;
+  if (t.includes('compras quitadas') || t.includes('quitadas')) return { tipo: 'quitadas' };
+  if (t.includes('relatorio detalhado') || t.includes('relatório detalhado')) return { tipo: 'detalhado' };
+  if (t.includes('relatorio') || t.includes('relatorio geral')) return { tipo: 'geral' };
+  // Saldo individual: "saldo <nome>"
+  const mSaldo = texto.match(/^saldo\s+(.+)$/i);
+  if (mSaldo) return { tipo: 'individual', nome: mSaldo[1].trim() };
+  return { tipo: null };
 }
 
 let reconectando = false;
@@ -455,14 +578,21 @@ async function iniciarBot() {
           else if (msg.message.extendedTextMessage) texto = msg.message.extendedTextMessage.text;
           if (!texto) continue;
 
-          // Verifica se e pedido de relatorio (detalhado ou geral)
-          const qual = tipoRelatorio(texto);
-          if (qual === 'detalhado') {
+          const cmd = detectarComando(texto);
+          if (cmd.tipo === 'quitadas') {
+            await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioQuitados() });
+            continue;
+          }
+          if (cmd.tipo === 'detalhado') {
             await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioDetalhado() });
             continue;
           }
-          if (qual === 'geral') {
+          if (cmd.tipo === 'geral') {
             await sock.sendMessage(msg.key.remoteJid, { text: await gerarRelatorioGeral() });
+            continue;
+          }
+          if (cmd.tipo === 'individual') {
+            await sock.sendMessage(msg.key.remoteJid, { text: await gerarSaldoIndividual(cmd.nome) });
             continue;
           }
 
