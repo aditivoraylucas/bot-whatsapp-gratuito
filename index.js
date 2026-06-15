@@ -1,7 +1,7 @@
 process.on('uncaughtException', err => console.error('Erro nao tratado:', err.message));
 process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?.message || err));
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +10,7 @@ const { JWT } = require('google-auth-library');
 const http = require('http');
 const qrcode = require('qrcode');
 const pino = require('pino');
+const FormData = require('form-data');
 
 const GRUPO_NOME   = process.env.GRUPO_NOME   || 'vendas';
 const SPREADSHEET_ID               = process.env.SPREADSHEET_ID;
@@ -18,8 +19,38 @@ const GOOGLE_PRIVATE_KEY           = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\
 const PORT             = process.env.PORT  || 3000;
 const RENDER_API_KEY   = process.env.RENDER_API_KEY   || '';
 const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID|| '';
+const GROQ_API_KEY     = process.env.GROQ_API_KEY     || '';
 
 const AUTH_DIR = 'auth_info';
+
+// ─── TRANSCRIÇÃO DE ÁUDIO VIA GROQ WHISPER ───────────────────────────────────
+async function transcreverAudio(audioBuffer, mimeType) {
+  if (!GROQ_API_KEY) return null;
+  try {
+    const fetch = (await import('node-fetch')).default;
+    const ext = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
+    const form = new FormData();
+    form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
+    form.append('model', 'whisper-large-v3-turbo');
+    form.append('language', 'pt');
+    form.append('response_format', 'json');
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
+      body: form
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error('Groq erro:', err);
+      return null;
+    }
+    const data = await res.json();
+    return data.text?.trim() || null;
+  } catch (e) {
+    console.error('Erro transcrição Groq:', e.message);
+    return null;
+  }
+}
 
 // ─── PRECOS E PRODUTOS ────────────────────────────────────────────────────────
 const PRECOS_FILE = 'precos.json';
@@ -148,7 +179,6 @@ function extrairValor(texto) {
 // ─── DATA (só dd/mm/aaaa, sem hora) ──────────────────────────────────────────
 function agora() { return new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
 function agoraData() { return new Date().toLocaleDateString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
-// Extrai só dd/mm/aaaa de uma string de data (que pode ter hora)
 function soData(str) {
   if(!str) return '';
   return (str.trim().split(' ')[0]) || str.trim();
@@ -886,7 +916,7 @@ function detectarComando(texto) {
 
 // ─── AJUDA ────────────────────────────────────────────────────────────────────
 function gerarAjuda() {
-  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n_julia transferiu 15_\n_julia mandou 20 reais_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico completo\n_resumo_ \u2014 resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ \u2014 lista produtos e pre\u00e7os\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_novo produto brownie 8_ \u2014 novo produto\n_cancelar julia_ \u2014 cancela \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida de um cliente\n_lembrete_ \u2014 envia cobran\u00e7as manualmente`;
+  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n_julia transferiu 15_\n_julia mandou 20 reais_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico completo\n_resumo_ \u2014 resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ \u2014 lista produtos e pre\u00e7os\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_novo produto brownie 8_ \u2014 novo produto\n_cancelar julia_ \u2014 cancela \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida de um cliente\n_lembrete_ \u2014 envia cobran\u00e7as manualmente\n\n\ud83c\udfa4 *\u00c1udio:*\n_Envie um \u00e1udio no grupo e o bot transcreve automaticamente!_`;
 }
 
 // ─── AGENDAMENTOS ─────────────────────────────────────────────────────────────
@@ -913,6 +943,57 @@ function agendarTarefas(sock, jid) {
 }
 
 let reconectando=false;
+
+async function processarTexto(texto, jid, sock) {
+  const cmd=detectarComando(texto);
+  if(cmd.tipo==='quitadas') return await gerarRelatorioQuitados();
+  if(cmd.tipo==='detalhado') return await gerarRelatorioDetalhado();
+  if(cmd.tipo==='geral') return await gerarRelatorioGeral();
+  if(cmd.tipo==='resumo') return await gerarResumoDiario();
+  if(cmd.tipo==='mes') return await gerarRelatorioMes(cmd.mes);
+  if(cmd.tipo==='individual') return await gerarSaldoIndividual(cmd.nome);
+  if(cmd.tipo==='historico') return await gerarHistoricoCliente(cmd.nome);
+  if(cmd.tipo==='cancelar') return await cancelarLancamento(jid,cmd.nome);
+  if(cmd.tipo==='zerar') return await zerarCliente(cmd.nome);
+  if(cmd.tipo==='produtos') return listarProdutos();
+  if(cmd.tipo==='ajuda') return gerarAjuda();
+  if(cmd.tipo==='lembrete'){ await verificarLembretes(sock,jid); return null; }
+  if(cmd.tipo==='mudarpreco') return mudarPreco(cmd.produto,cmd.valor);
+  if(cmd.tipo==='novoproduto') return cadastrarNovoProduto(cmd.nome,cmd.valor);
+
+  const linhas=texto.split('\n').map(l=>l.trim()).filter(Boolean);
+  const respostas=[];
+  for(const linha of linhas){
+    const pagamento=parsearPagamento(linha);
+    if(pagamento){
+      let result;
+      if(pagamento.tipo==='valor'){
+        result=await processarPagamentoValor(pagamento.nome,pagamento.valor,jid);
+      } else {
+        result=await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
+      }
+      respostas.push(result.msg);
+      continue;
+    }
+    const parsed=parsearLinha(linha);
+    if(!parsed) continue;
+    const linhasResposta=[];
+    for(const item of parsed.itens){
+      const resultado=await registrarOuAcumular(parsed.nome,item.produto,item.quantidade);
+      if(!resultado){
+        linhasResposta.push(`\u274c Erro ao registrar ${nomeProdutoExib(item.produto)}.`);
+      } else if(resultado.limiteBloqueado){
+        linhasResposta.push(`\u26a0\ufe0f *${resultado.cliente}* atingiu o limite de cr\u00e9dito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}! (atual: R$ ${resultado.totalAtual.toFixed(2)})`);
+      } else {
+        pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:(PRECOS[item.produto]||0)*item.quantidade});
+        const nomeProd=nomeProdutoExib(item.produto);
+        linhasResposta.push(`${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+      }
+    }
+    if(linhasResposta.length) respostas.push(`*${parsed.nome}*\n`+linhasResposta.join('\n'));
+  }
+  return respostas.length ? respostas.join('\n\n') : null;
+}
 
 async function iniciarBot() {
   if(reconectando) return;
@@ -964,69 +1045,34 @@ async function iniciarBot() {
             agendarTarefas(sock,jid);
           }
 
+          // ─── MENSAGEM DE ÁUDIO ────────────────────────────────────────────
+          const audioMsg = msg.message.audioMessage || msg.message.pttMessage;
+          if(audioMsg && GROQ_API_KEY){
+            try {
+              console.log('Áudio recebido, transcrevendo...');
+              const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+              const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
+              const textoTranscrito = await transcreverAudio(buffer, mimeType);
+              if(textoTranscrito){
+                console.log('Transcrição:', textoTranscrito);
+                const resposta = await processarTexto(textoTranscrito, jid, sock);
+                if(resposta){
+                  await sock.sendMessage(jid, { text: `\ud83c\udfa4 _"${textoTranscrito}"_\n\n${resposta}` });
+                }
+              }
+            } catch(e){ console.error('Erro ao processar áudio:', e.message); }
+            continue;
+          }
+
+          // ─── MENSAGEM DE TEXTO ────────────────────────────────────────────
           let texto=null;
           if(msg.message.conversation) texto=msg.message.conversation;
           else if(msg.message.extendedTextMessage) texto=msg.message.extendedTextMessage.text;
           if(!texto) continue;
 
-          const cmd=detectarComando(texto);
+          const resposta = await processarTexto(texto, jid, sock);
+          if(resposta) await sock.sendMessage(jid, {text: resposta});
 
-          if(cmd.tipo==='quitadas'){ await sock.sendMessage(jid,{text:await gerarRelatorioQuitados()});continue; }
-          if(cmd.tipo==='detalhado'){ await sock.sendMessage(jid,{text:await gerarRelatorioDetalhado()});continue; }
-          if(cmd.tipo==='geral'){ await sock.sendMessage(jid,{text:await gerarRelatorioGeral()});continue; }
-          if(cmd.tipo==='resumo'){ await sock.sendMessage(jid,{text:await gerarResumoDiario()});continue; }
-          if(cmd.tipo==='mes'){ await sock.sendMessage(jid,{text:await gerarRelatorioMes(cmd.mes)});continue; }
-          if(cmd.tipo==='individual'){ await sock.sendMessage(jid,{text:await gerarSaldoIndividual(cmd.nome)});continue; }
-          if(cmd.tipo==='historico'){ await sock.sendMessage(jid,{text:await gerarHistoricoCliente(cmd.nome)});continue; }
-          if(cmd.tipo==='cancelar'){ await sock.sendMessage(jid,{text:await cancelarLancamento(jid,cmd.nome)});continue; }
-          if(cmd.tipo==='zerar'){ await sock.sendMessage(jid,{text:await zerarCliente(cmd.nome)});continue; }
-          if(cmd.tipo==='produtos'){ await sock.sendMessage(jid,{text:listarProdutos()});continue; }
-          if(cmd.tipo==='ajuda'){ await sock.sendMessage(jid,{text:gerarAjuda()});continue; }
-          if(cmd.tipo==='lembrete'){ await verificarLembretes(sock,jid);continue; }
-          if(cmd.tipo==='mudarpreco'){
-            await sock.sendMessage(jid,{text:mudarPreco(cmd.produto,cmd.valor)});continue;
-          }
-          if(cmd.tipo==='novoproduto'){
-            await sock.sendMessage(jid,{text:cadastrarNovoProduto(cmd.nome,cmd.valor)});continue;
-          }
-
-          const linhas=texto.split('\n').map(l=>l.trim()).filter(Boolean);
-          const respostas=[];
-
-          for(const linha of linhas){
-            const pagamento=parsearPagamento(linha);
-            if(pagamento){
-              let result;
-              if(pagamento.tipo==='valor'){
-                result=await processarPagamentoValor(pagamento.nome,pagamento.valor,jid);
-              } else {
-                result=await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
-              }
-              respostas.push(result.msg);
-              continue;
-            }
-
-            const parsed=parsearLinha(linha);
-            if(!parsed) continue;
-            const linhasResposta=[];
-            for(const item of parsed.itens){
-              const resultado=await registrarOuAcumular(parsed.nome,item.produto,item.quantidade);
-              if(!resultado){
-                linhasResposta.push(`\u274c Erro ao registrar ${nomeProdutoExib(item.produto)}.`);
-              } else if(resultado.limiteBloqueado){
-                linhasResposta.push(`\u26a0\ufe0f *${resultado.cliente}* atingiu o limite de cr\u00e9dito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}! (atual: R$ ${resultado.totalAtual.toFixed(2)})`);
-              } else {
-                pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:(PRECOS[item.produto]||0)*item.quantidade});
-                const nomeProd=nomeProdutoExib(item.produto);
-                linhasResposta.push(`${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
-              }
-            }
-            if(linhasResposta.length) respostas.push(`*${parsed.nome}*\n`+linhasResposta.join('\n'));
-          }
-
-          if(respostas.length){
-            await sock.sendMessage(jid,{text:respostas.join('\n\n')});
-          }
         } catch(err){console.error('Erro ao processar mensagem:',err.message);}
       }
     });
