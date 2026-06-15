@@ -34,7 +34,6 @@ async function transcreverAudio(audioBuffer, mimeType) {
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
     form.append('response_format', 'json');
-    // Prompt com exemplos reais de comandos para guiar o Whisper
     const promptWhisper = [
       'Comandos de venda: nomes de clientes seguidos de quantidade e produto.',
       'Produtos: trufa, trufas, bolo, bolos, bombom, bombons.',
@@ -59,6 +58,68 @@ async function transcreverAudio(audioBuffer, mimeType) {
     console.error('Erro transcrição Groq:', e.message);
     return null;
   }
+}
+
+// ─── LIMPAR TEXTO DE TRANSCRIÇÃO ─────────────────────────────────────────────
+// Remove pontuação final das palavras e corrige erros comuns do Whisper
+function limparTranscricao(texto) {
+  if (!texto) return texto;
+  // Remove pontuação no fim de cada palavra (ponto, vírgula, exclamação, interrogação)
+  return texto
+    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')  // remove pontuação ao final das palavras
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ─── FUZZY MATCH PARA COMANDOS DE VOZ ────────────────────────────────────────
+// Mapeia palavras que o Whisper erra com frequência para as corretas
+const CORRECOES_VOZ = {
+  // comandos
+  'saudo': 'saldo',
+  'saud': 'saldo',
+  'salvo': 'saldo',
+  'salda': 'saldo',
+  'saldos': 'saldo',
+  'relatorio': 'relatorio',
+  'relatorios': 'relatorio',
+  'relato': 'relatorio',
+  'rezumo': 'resumo',
+  'resuno': 'resumo',
+  'istorico': 'historico',
+  'historico': 'historico',
+  'cancelado': 'cancelar',
+  'cancela': 'cancelar',
+  'cancelas': 'cancelar',
+  'zera': 'zerar',
+  'ajudas': 'ajuda',
+  'produto': 'produtos',
+  // pagamentos
+  'pagou': 'pagou',
+  'pagol': 'pagou',
+  'pago': 'pagou',
+  'pix': 'pix',
+  'pics': 'pix',
+  'pik': 'pix',
+  'transferio': 'transferiu',
+  'transferiou': 'transferiu',
+  // produtos
+  'trufa': 'trufa',
+  'trufas': 'trufas',
+  'trufinha': 'trufinha',
+  'bolo': 'bolo',
+  'bolos': 'bolos',
+  'bombon': 'bombom',
+  'bombons': 'bombons',
+};
+
+function corrigirPalavra(palavra) {
+  const n = norm(palavra);
+  return CORRECOES_VOZ[n] || palavra;
+}
+
+function corrigirTranscricao(texto) {
+  if (!texto) return texto;
+  return texto.split(/\s+/).map(p => corrigirPalavra(p)).join(' ');
 }
 
 // ─── PRECOS E PRODUTOS ────────────────────────────────────────────────────────
@@ -791,7 +852,13 @@ const PALAVRAS_RESERVADAS = new Set([
 ]);
 
 function parsearLinha(linha) {
-  const limpa=linha.replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
+  const limpa=linha
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')  // remove pontuação no final de palavras
+    .replace(/,/g,' ')
+    .replace(/\b(mais|e|de)\b/gi,' ')
+    .replace(/\+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
   const palavrasOrig=limpa.split(' ').filter(Boolean);
   const palavrasNorm=palavrasOrig.map(norm);
   const n=palavrasNorm.length;
@@ -1061,12 +1128,15 @@ async function iniciarBot() {
               console.log('Áudio recebido, transcrevendo...');
               const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
               const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
-              const textoTranscrito = await transcreverAudio(buffer, mimeType);
-              if(textoTranscrito){
-                console.log('Transcrição:', textoTranscrito);
+              const textoRaw = await transcreverAudio(buffer, mimeType);
+              if(textoRaw){
+                // Limpa pontuação e corrige erros comuns do Whisper
+                const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
+                console.log('Transcrição:', textoRaw);
+                if(textoRaw !== textoTranscrito) console.log('Transcrição corrigida:', textoTranscrito);
                 const resposta = await processarTexto(textoTranscrito, jid, sock);
                 if(resposta){
-                  await sock.sendMessage(jid, { text: `\ud83c\udfa4 _"${textoTranscrito}"_\n\n${resposta}` });
+                  await sock.sendMessage(jid, { text: `\ud83c\udfa4 _"${textoRaw}"_\n\n${resposta}` });
                 }
               }
             } catch(e){ console.error('Erro ao processar áudio:', e.message); }
