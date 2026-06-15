@@ -34,6 +34,15 @@ async function transcreverAudio(audioBuffer, mimeType) {
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
     form.append('response_format', 'json');
+    // Prompt com exemplos reais de comandos para guiar o Whisper
+    const promptWhisper = [
+      'Comandos de venda: nomes de clientes seguidos de quantidade e produto.',
+      'Produtos: trufa, trufas, bolo, bolos, bombom, bombons.',
+      'Exemplos: "julia 1 bolo", "ana 3 trufas", "carlos 2 bolos", "maria pagou 10",',
+      '"pedro pix 15", "joao pagou 2 trufas", "relatorio", "resumo", "cancelar julia".',
+      'Os nomes são nomes próprios brasileiros. Os números são quantidades pequenas (1 a 20).',
+    ].join(' ');
+    form.append('prompt', promptWhisper);
     const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
