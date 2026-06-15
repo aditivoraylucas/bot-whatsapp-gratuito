@@ -67,7 +67,6 @@ function pushLancamento(jid, obj) {
 
 // ─── NORMALIZAÇÃO ─────────────────────────────────────────────────────────────
 function norm(t) {
-  // Remove caracteres invisíveis do WhatsApp (zero-width, etc) e normaliza
   return (t||'')
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
     .toLowerCase()
@@ -127,7 +126,6 @@ function toProduto(trecho) {
 }
 
 // ─── EXTRAIR VALOR MONETÁRIO ──────────────────────────────────────────────────
-// Suporta: 10 | 10 reais | R$10 | R$ 10 | 10,50 | 10.50 | pix de 10
 function extrairValor(texto) {
   if(!texto) return null;
   const t = norm(texto)
@@ -141,14 +139,21 @@ function extrairValor(texto) {
     .replace(/\benviou\b/g,' ')
     .replace(/\bpagou\b/g,' ')
     .trim();
-  // Aceita número com vírgula ou ponto decimal
   const m = t.match(/(\d+[,.]?\d*)/);
   if(!m) return null;
   const val = parseFloat(m[1].replace(',','.'));
   return isNaN(val) ? null : val;
 }
 
+// ─── DATA (só dd/mm/aaaa, sem hora) ──────────────────────────────────────────
 function agora() { return new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
+function agoraData() { return new Date().toLocaleDateString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
+// Extrai só dd/mm/aaaa de uma string de data (que pode ter hora)
+function soData(str) {
+  if(!str) return '';
+  return (str.trim().split(' ')[0]) || str.trim();
+}
+
 function capitalizarNome(n) {
   if(!n) return '';
   return n.trim().split(' ').map(p=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join(' ');
@@ -368,7 +373,6 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
-    // Busca fuzzy para encontrar o cliente mesmo com erro de digitação
     const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
     const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const rowsCliente=nomeCanon
@@ -409,7 +413,7 @@ async function gerarRelatorioGeral() {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
-    if(!rows.length) return '\ud83d\udcca Nenhuma d\u00edvida em aberto no momento.';
+    if(!rows.length) return 'Nenhuma d\u00edvida em aberto no momento.';
     const clientes={};
     for(const row of rows){
       const nome=(row.get('Cliente')||'').trim();
@@ -421,19 +425,19 @@ async function gerarRelatorioGeral() {
       clientes[nome].itens.push({produto,quantidade,total});
       clientes[nome].totalDevido+=total;
     }
-    if(!Object.keys(clientes).length) return '\ud83d\udcca Nenhuma d\u00edvida em aberto no momento.';
+    if(!Object.keys(clientes).length) return 'Nenhuma d\u00edvida em aberto no momento.';
     const ordenados=Object.entries(clientes).sort((a,b)=>b[1].totalDevido-a[1].totalDevido);
-    let resposta='\ud83d\udcca *Relat\u00f3rio de D\u00edvidas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta='*Relat\u00f3rio de D\u00edvidas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral=0;
     for(const [nome,dados] of ordenados){
-      resposta+=`\n\ud83d\udc64 *${nome}*\n`;
+      resposta+=`\n*${nome}*\n`;
       for(const item of dados.itens){
-        resposta+=`   ${emojiProduto(item.produto)} ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
+        resposta+=`  ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
       }
-      resposta+=`   \ud83d\udcb0 *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
+      resposta+=`  *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
       totalGeral+=dados.totalDevido;
     }
-    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
   } catch(err){console.error('Erro relatorio:',err.message);return '\u274c Erro ao gerar relat\u00f3rio.';}
 }
@@ -490,27 +494,27 @@ async function carregarHistoricoAgrupado(filtroMes) {
 async function gerarRelatorioDetalhado() {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
-    if(!Object.keys(historico).length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    if(!Object.keys(historico).length) return 'Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
     const devedores=Object.keys(historico).filter(n=>(saldos[n]||0)>0);
-    if(!devedores.length) return '\ud83c\udf89 Nenhuma d\u00edvida em aberto! Todos quitados.';
+    if(!devedores.length) return '\u2705 Nenhuma d\u00edvida em aberto! Todos quitados.';
     devedores.sort((a,b)=>(saldos[b]||0)-(saldos[a]||0));
-    let resposta='\ud83d\udcdd *Relat\u00f3rio Detalhado*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta='*Relat\u00f3rio Detalhado*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     let totalGeral=0;
     for(const nome of devedores){
       const movs=historico[nome];
       const saldoAtual=saldos[nome]||0;
-      resposta+=`\n\ud83d\udc64 *${nome}*\n`;
+      resposta+=`\n*${nome}*\n`;
       for(const m of movs){
         if(m.tipo==='Compra'){
-          resposta+=`   \ud83d\uded2 ${emojiProduto(m.produto)} Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
+          resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         } else if(m.tipo==='Pagamento'){
-          resposta+=`   \u2705 Pagamento: R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
+          resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         }
       }
-      resposta+=`   \ud83d\udcb0 *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
+      resposta+=`  *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
       totalGeral+=saldoAtual;
     }
-    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb5 *TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
   } catch(err){console.error('Erro relatorio detalhado:',err.message);return '\u274c Erro ao gerar relat\u00f3rio detalhado.';}
 }
@@ -519,23 +523,23 @@ async function gerarRelatorioDetalhado() {
 async function gerarRelatorioQuitados() {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
-    if(!Object.keys(historico).length) return '\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    if(!Object.keys(historico).length) return 'Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
     const quitados=Object.keys(historico).filter(n=>!(saldos[n]>0));
-    if(!quitados.length) return '\ud83d\udcca Nenhum cliente quitado ainda.';
+    if(!quitados.length) return 'Nenhum cliente quitado ainda.';
     quitados.sort();
-    let resposta='\ud83c\udf89 *Compras Quitadas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta='*Compras Quitadas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
     for(const nome of quitados){
       const movs=historico[nome];
       const totalPago=movs.filter(m=>m.tipo==='Pagamento').reduce((s,m)=>s+m.valor,0);
-      resposta+=`\n\ud83d\udc64 *${nome}*\n`;
+      resposta+=`\n*${nome}*\n`;
       for(const m of movs){
         if(m.tipo==='Compra'){
-          resposta+=`   \ud83d\uded2 ${emojiProduto(m.produto)} Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
+          resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         } else if(m.tipo==='Pagamento'){
-          resposta+=`   \ud83d\udcb3 Pagamento: R$ ${m.valor.toFixed(2)}\n      \ud83d\udcc5 ${m.data}\n`;
+          resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         }
       }
-      resposta+=`   \u2705 *Quitado | Total pago: R$ ${totalPago.toFixed(2)}*\n`;
+      resposta+=`  \u2705 Quitado | Total pago: R$ ${totalPago.toFixed(2)}\n`;
     }
     resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2705 *${quitados.length} cliente(s) com conta quitada*`;
     return resposta;
@@ -553,21 +557,21 @@ async function gerarSaldoIndividual(nomeDigitado) {
       const{historico,saldos}=await carregarHistoricoAgrupado();
       const nomeHist=resolverNome(nomeDigitado,Object.keys(historico));
       if(nomeHist && !(saldos[nomeHist]>0))
-        return `\u2705 *${nomeHist}* n\u00e3o tem d\u00edvidas em aberto. Conta quitada! \ud83c\udf89`;
+        return `\u2705 *${nomeHist}* n\u00e3o tem d\u00edvidas em aberto. Conta quitada!`;
       return `\u274c Nenhuma movimenta\u00e7\u00e3o encontrada para *${capitalizarNome(nomeDigitado)}*.`;
     }
     const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
     if(!rowsCliente.length) return `\u2705 *${nomeCanon}* n\u00e3o tem d\u00edvidas em aberto.`;
     let totalDevido=0;
-    let resposta=`\ud83d\udc64 *${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    let resposta=`*${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
     for(const row of rowsCliente){
       const produto=norm(row.get('Produto')||'');
       const qtd=parseInt(row.get('Quantidade')||'0');
       const total=parseFloat(row.get('Total')||'0');
-      resposta+=`${emojiProduto(produto)} ${nomeProdutoExib(produto)}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
+      resposta+=`${nomeProdutoExib(produto)}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
       totalDevido+=total;
     }
-    resposta+=`\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcb0 *Total devido: R$ ${totalDevido.toFixed(2)}*`;
+    resposta+=`\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n*Total devido: R$ ${totalDevido.toFixed(2)}*`;
     return resposta;
   } catch(err){console.error('Erro saldo:',err.message);return '\u274c Erro ao consultar saldo.';}
 }
@@ -581,22 +585,22 @@ async function gerarHistoricoCliente(nomeDigitado) {
     if(!nomeCanon||!historico[nomeCanon]) return `\u274c Nenhum hist\u00f3rico encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const movs=historico[nomeCanon];
     const saldoAtual=saldos[nomeCanon]||0;
-    let resposta=`\ud83d\udcc2 *Hist\u00f3rico de ${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    let resposta=`*Hist\u00f3rico de ${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
     let totalComprado=0, totalPago=0;
     for(const m of movs){
       if(m.tipo==='Compra'){
-        resposta+=`\ud83d\uded2 ${emojiProduto(m.produto)} Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}\n   \ud83d\udcc5 ${m.data}\n`;
+        resposta+=`Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         totalComprado+=m.valor;
       } else if(m.tipo==='Pagamento'){
-        resposta+=`\u2705 Pagamento: R$ ${m.valor.toFixed(2)}\n   \ud83d\udcc5 ${m.data}\n`;
+        resposta+=`Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         totalPago+=m.valor;
       }
     }
     resposta+=`\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
-    resposta+=`\ud83d\uded2 Total comprado: R$ ${totalComprado.toFixed(2)}\n`;
-    resposta+=`\u2705 Total pago: R$ ${totalPago.toFixed(2)}\n`;
+    resposta+=`Total comprado: R$ ${totalComprado.toFixed(2)}\n`;
+    resposta+=`Total pago: R$ ${totalPago.toFixed(2)}\n`;
     resposta+=saldoAtual>0
-      ?`\ud83d\udcb0 *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`
+      ?`*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`
       :'\u2705 *Conta quitada!*';
     return resposta;
   } catch(err){console.error('Erro historico:',err.message);return '\u274c Erro ao buscar hist\u00f3rico.';}
@@ -610,7 +614,7 @@ async function gerarRelatorioMes(mes) {
     const mesNum=parseInt(norm(mes));
     const nomeMesExib=isNaN(mesNum)?capitalizarNome(mes):(nomesMes[mesNum]||capitalizarNome(mes));
     const todosNomes=Object.keys(historico);
-    if(!todosNomes.length) return `\ud83d\udcca Nenhuma movimenta\u00e7\u00e3o registrada em ${nomeMesExib}.`;
+    if(!todosNomes.length) return `Nenhuma movimenta\u00e7\u00e3o registrada em ${nomeMesExib}.`;
     let totalVendas=0, totalRecebido=0, qtdTrufa=0, qtdBolo=0;
     let detalhe='';
     for(const nome of todosNomes.sort()){
@@ -620,21 +624,21 @@ async function gerarRelatorioMes(mes) {
       qtdTrufa+=movs.filter(m=>m.tipo==='Compra'&&m.produto==='trufa').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
       qtdBolo +=movs.filter(m=>m.tipo==='Compra'&&m.produto==='bolo').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
       totalVendas+=comprado; totalRecebido+=pago;
-      detalhe+=`\n\ud83d\udc64 *${nome}*: comprou R$ ${comprado.toFixed(2)} | pagou R$ ${pago.toFixed(2)}\n`;
+      detalhe+=`\n*${nome}*: comprou R$ ${comprado.toFixed(2)} | pagou R$ ${pago.toFixed(2)}\n`;
     }
-    return `\ud83d\udcc5 *Relat\u00f3rio de ${nomeMesExib}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n${detalhe}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83c\udf6b Trufas: ${qtdTrufa} unid. | \ud83c\udf82 Bolos: ${qtdBolo} unid.\n\ud83d\udcb5 Total em vendas: R$ ${totalVendas.toFixed(2)}\n\u2705 Total recebido: R$ ${totalRecebido.toFixed(2)}\n\u26a0\ufe0f A receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
+    return `*Relat\u00f3rio de ${nomeMesExib}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n${detalhe}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} unid. | Bolos: ${qtdBolo} unid.\nTotal em vendas: R$ ${totalVendas.toFixed(2)}\nTotal recebido: R$ ${totalRecebido.toFixed(2)}\nA receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
   } catch(err){console.error('Erro relatorio mes:',err.message);return '\u274c Erro ao gerar relat\u00f3rio do m\u00eas.';}
 }
 
 // ─── RESUMO DIARIO ────────────────────────────────────────────────────────────
 async function gerarResumoDiario() {
   try {
-    const hoje=new Date().toLocaleDateString('pt-BR',{timeZone:'America/Sao_Paulo'});
+    const hoje=agoraData();
     const{historico}=await carregarHistoricoAgrupado();
     let totalVendas=0,totalPago=0,qtdTrufa=0,qtdBolo=0,clientes=new Set();
     for(const [nome,movs] of Object.entries(historico)){
       for(const m of movs){
-        const dataMovStr=m.data.split(' ')[0];
+        const dataMovStr=soData(m.data);
         if(dataMovStr!==hoje) continue;
         if(m.tipo==='Compra'){
           totalVendas+=m.valor;
@@ -649,7 +653,7 @@ async function gerarResumoDiario() {
     const sheetSaldo=await getSheetSaldo();
     const rows=await sheetSaldo.getRows();
     const totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    return `\ud83d\udcc6 *Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83c\udf6b Trufas: ${qtdTrufa} | \ud83c\udf82 Bolos: ${qtdBolo}\n\ud83d\udc65 Clientes atendidos: ${clientes.size}\n\ud83d\udcb0 Vendas do dia: R$ ${totalVendas.toFixed(2)}\n\u2705 Recebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\udcca Total em aberto: R$ ${totalAberto.toFixed(2)}`;
+    return `*Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
   } catch(err){console.error('Erro resumo:',err.message);return '\u274c Erro ao gerar resumo.';}
 }
 
@@ -682,7 +686,7 @@ async function verificarLembretes(sock, jid) {
     const nomes=Object.keys(clientes);
     if(!nomes.length) return;
     for(const [nome,dados] of Object.entries(clientes)){
-      const msg=`\u26a0\ufe0f *Lembrete de cobran\u00e7a*\n\ud83d\udc64 *${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
+      const msg=`\u26a0\ufe0f *Lembrete de cobran\u00e7a*\n*${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
       await sock.sendMessage(jid,{text:msg});
     }
   } catch(e){console.error('Erro lembrete:',e.message);}
@@ -707,17 +711,17 @@ function cadastrarNovoProduto(nomeProduto, preco) {
   SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];
   salvarPrecos();
   salvarSinonimosExtra();
-  return `\u2705 Novo produto cadastrado!\n\ud83e\udee4 *${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _\"cliente nome ${norm(nomeProduto)}\"_`;
+  return `\u2705 Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;
 }
 
 // ─── LISTAR PRODUTOS ──────────────────────────────────────────────────────────
 function listarProdutos() {
   const todos=todosOsSinonimos();
-  let msg='\ud83e\udee4 *Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+  let msg='*Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
   for(const [key] of Object.entries(todos)){
     const preco=PRECOS[key];
     if(preco===undefined) continue;
-    msg+=`${emojiProduto(key)} *${nomeProdutoExib(key)}*: R$ ${preco.toFixed(2)}\n`;
+    msg+=`${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;
   }
   msg+='\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_Para mudar o pre\u00e7o: preco [produto] [valor]_';
   return msg;
@@ -784,54 +788,30 @@ function parsearLinha(linha) {
 }
 
 // ─── PARSEAR PAGAMENTO ────────────────────────────────────────────────────────
-// Reconhece: pagou, pix, transferiu, depositou, mandou, enviou
-// Formatos:  julia pagou 10 | julia pix 10 | julia pagou 10 reais | julia pix de 10
-//            julia pagou R$10 | julia pagou 10,50 | julia pagou 2 trufas
-//            julia transferiu 15 | julia mandou 20 reais | julia enviou pix de 10
 function parsearPagamento(linha) {
-  // Normaliza mas mantém o texto original para extrair o nome com capitalização correta
   const tNorm = norm(linha);
-
-  // Verifica se tem palavra-chave de pagamento
   if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
-
-  // Encontra a keyword na versão normalizada para pegar posição correta
   const kwMatch = tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);
   if (!kwMatch) return null;
-
-  const posKw = kwMatch.index;
   const keyword = kwMatch[1];
-
-  // Extrai o nome bruto ANTES da keyword (usando posição na string normalizada)
-  // mas preserva capitalização original usando a linha original
-  // Estratégia: contar palavras antes da keyword
   const palavrasNorm = tNorm.split(/\s+/).filter(Boolean);
   const palavrasOrig = linha.trim().split(/\s+/).filter(Boolean);
   let kwIdx = -1;
   for(let i=0;i<palavrasNorm.length;i++){
     if(palavrasNorm[i]===keyword){ kwIdx=i; break; }
   }
-  if(kwIdx<=0) return null; // sem nome antes da keyword
-
+  if(kwIdx<=0) return null;
   const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
   if(!nomeRaw) return null;
-
-  // Nome capitalizado
   const nome = capitalizarNome(nomeRaw);
-
-  // Pega tudo DEPOIS da keyword para analisar o que foi pago
   const restoNorm = palavrasNorm.slice(kwIdx+1).join(' ').trim();
   const restoOrig = palavrasOrig.slice(kwIdx+1).join(' ').trim();
-
-  // Limpa palavras de controle do resto normalizado
   const palavrasResto = restoNorm
     .replace(/\bde\b/g, ' ')
     .replace(/\bpix\b/g, ' ')
     .replace(/\breais\b/g, ' ')
     .replace(/\br\$\s*/g, ' ')
     .split(/\s+/).filter(Boolean);
-
-  // 1. Tenta qtd + produto (ex: 2 trufas, duas trufas)
   for (let i = 0; i < palavrasResto.length; i++) {
     const qtd = toNumero(palavrasResto[i]);
     if (qtd === null) continue;
@@ -844,8 +824,6 @@ function parsearPagamento(linha) {
       if (p1) return { tipo: 'produto', nome, qtd, produto: p1 };
     }
   }
-
-  // 2. Tenta só produto sem qtd (ex: pagou trufa, pagou bombom)
   for (let i = 0; i < palavrasResto.length; i++) {
     if (i + 1 < palavrasResto.length) {
       const p2 = toProduto(palavrasResto[i] + ' ' + palavrasResto[i+1]);
@@ -854,11 +832,8 @@ function parsearPagamento(linha) {
     const p1 = toProduto(palavrasResto[i]);
     if (p1) return { tipo: 'produto', nome, qtd: 1, produto: p1 };
   }
-
-  // 3. Tenta valor monetário (ex: pagou 10, pix de 10, pagou R$10,50, pix 7)
   const valor = extrairValor(restoOrig);
   if (valor !== null && valor > 0) return { tipo: 'valor', nome, valor };
-
   return null;
 }
 
@@ -1019,7 +994,6 @@ async function iniciarBot() {
           const respostas=[];
 
           for(const linha of linhas){
-            // Pagamento tem prioridade sobre compra
             const pagamento=parsearPagamento(linha);
             if(pagamento){
               let result;
@@ -1043,9 +1017,8 @@ async function iniciarBot() {
                 linhasResposta.push(`\u26a0\ufe0f *${resultado.cliente}* atingiu o limite de cr\u00e9dito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}! (atual: R$ ${resultado.totalAtual.toFixed(2)})`);
               } else {
                 pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:(PRECOS[item.produto]||0)*item.quantidade});
-                const emoji=emojiProduto(item.produto);
                 const nomeProd=nomeProdutoExib(item.produto);
-                linhasResposta.push(`${emoji} ${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+                linhasResposta.push(`${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
               }
             }
             if(linhasResposta.length) respostas.push(`*${parsed.nome}*\n`+linhasResposta.join('\n'));
