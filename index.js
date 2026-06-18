@@ -301,7 +301,6 @@ http.createServer(async(req,res)=>{
       res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u2705 Bot conectado!</h1><p>Funcionando normalmente.</p></body></html>');
     } else if(qrCodeData){
       const qrImage=await qrcode.toDataURL(qrCodeData).catch(()=>null);
-      // Extrai apenas o código de pareamento (parte antes do primeiro vírgula, se houver)
       const codigoTexto = qrCodeData.split(',')[0] || qrCodeData;
       res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px;background:#f0f0f0">
         <div style="max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(0,0,0,0.1)">
@@ -470,7 +469,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
     return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
 // ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
@@ -510,7 +509,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       }
     }
     return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -959,7 +958,7 @@ function detectarComando(texto) {
   if(t==='produtos'||t==='lista produtos'||t==='listar produtos') return{tipo:'produtos'};
   if(t==='ajuda'||t==='!ajuda'||t==='help') return{tipo:'ajuda'};
 
-  const mRelArg=texto.match(/^relat[oó]rio\s+(.+)$/i);
+  const mRelArg=texto.match(/^relat[o\u00f3]rio\s+(.+)$/i);
   if(mRelArg){
     const arg=mRelArg[1].trim();
     if(isMes(arg)) return{tipo:'mes',mes:arg};
@@ -969,7 +968,7 @@ function detectarComando(texto) {
   const mSaldo=texto.match(/^saldo\s+(.+)$/i);
   if(mSaldo) return{tipo:'individual',nome:mSaldo[1].trim()};
 
-  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[oó]rico\s+(.+)$/i);
+  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[o\u00f3]rico\s+(.+)$/i);
   if(mHist) return{tipo:'historico',nome:mHist[1].trim()};
 
   const mCancel=texto.match(/^cancelar\s+(.+)$/i);
@@ -978,13 +977,13 @@ function detectarComando(texto) {
   const mZerar=texto.match(/^zerar\s+(.+)$/i);
   if(mZerar) return{tipo:'zerar',nome:mZerar[1].trim()};
 
-  const mPreco=texto.match(/^pre[cç]o\s+(\S+)\s+(.+)$/i);
+  const mPreco=texto.match(/^pre[c\u00e7]o\s+(\S+)\s+(.+)$/i);
   if(mPreco){
     const val=extrairValor(mPreco[2]);
     if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};
   }
 
-  const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-zà-ü\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
+  const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-z\u00e0-\u00fc\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
   if(mNovoProd){
     const val=extrairValor(mNovoProd[2]);
     if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};
@@ -1133,20 +1132,20 @@ async function iniciarBot() {
           const audioMsg = msg.message.audioMessage || msg.message.pttMessage;
           if(audioMsg && GROQ_API_KEY){
             try {
-              console.log('Áudio recebido, transcrevendo...');
+              console.log('\u00c1udio recebido, transcrevendo...');
               const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
               const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
               const textoRaw = await transcreverAudio(buffer, mimeType);
               if(textoRaw){
                 const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
-                console.log('Transcrição:', textoRaw);
-                if(textoRaw !== textoTranscrito) console.log('Transcrição corrigida:', textoTranscrito);
+                console.log('Transcri\u00e7\u00e3o:', textoRaw);
+                if(textoRaw !== textoTranscrito) console.log('Transcri\u00e7\u00e3o corrigida:', textoTranscrito);
                 const resposta = await processarTexto(textoTranscrito, jid, sock);
                 if(resposta){
                   await sock.sendMessage(jid, { text: `\ud83c\udfa4 _"${textoRaw}"_\n\n${resposta}` });
                 }
               }
-            } catch(e){ console.error('Erro ao processar áudio:', e.message); }
+            } catch(e){ console.error('Erro ao processar \u00e1udio:', e.message); }
             continue;
           }
 
