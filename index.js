@@ -15,7 +15,7 @@ const FormData = require('form-data');
 const GRUPO_NOME   = process.env.GRUPO_NOME   || 'vendas';
 const SPREADSHEET_ID               = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-const GOOGLE_PRIVATE_KEY           = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const GOOGLE_PRIVATE_KEY           = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\\\n/g, '\n');
 const PORT             = process.env.PORT  || 3000;
 const RENDER_API_KEY   = process.env.RENDER_API_KEY   || '';
 const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID|| '';
@@ -124,12 +124,10 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
-// ─── FIX: norm() agora remove aspas, aspas tipograficas e outros caracteres
-//          que o WhatsApp injeta ao formatar mensagens de audio/texto ──────────
 function norm(t) {
   return (t||'')
-    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g,'')   // caracteres invisíveis
-    .replace(/["""''`]/g,'')                        // aspas normais e tipográficas
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g,'')
+    .replace(/["""''`]/g,'')
     .toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
 }
 
@@ -213,7 +211,6 @@ async function salvarSessaoNoRender(){
 // ─── SERVIDOR HTTP ─────────────────────────────────────────────────────────
 const server = http.createServer(async(req,res)=>{
   try{
-    // POST /pairing — recebe numero e solicita codigo
     if(req.method==='POST' && req.url==='/pairing'){
       let body='';
       req.on('data',d=>body+=d);
@@ -261,7 +258,6 @@ const server = http.createServer(async(req,res)=>{
 <script>setTimeout(()=>location.reload(),30000)</script>
 </body></html>`);
     } else {
-      // Tela inicial: formulario para digitar o numero
       res.end(`<html><head><meta charset="utf-8"><title>Conectar WhatsApp</title></head>
 <body style="font-family:sans-serif;text-align:center;padding:30px;background:#f0f0f0">
 <div style="max-width:460px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(0,0,0,.1)">
@@ -300,14 +296,6 @@ async function getSheetHistorico(){
 async function registrarOuAcumular(clienteEnviado,produto,quantidade){
   try{
     const sheet=await getSheetSaldo();
-
-    // ─── FIX: garante que o cabeçalho existe antes de buscar linhas ──────────
-    let headers;
-    try { headers = sheet.headerValues; } catch(e) { headers = null; }
-    if(!headers || !headers.length){
-      await sheet.setHeaderRow(['Cliente','Produto','Quantidade','Total','UltimaCompra']);
-    }
-
     const rows=await sheet.getRows();
     const precoAtual=PRECOS[produto]||0;const valorNovo=precoAtual*quantidade;
     const existente=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
@@ -330,8 +318,7 @@ async function registrarOuAcumular(clienteEnviado,produto,quantidade){
       return{cliente,totalAcumulado:valorNovo,qtdAcumulada:quantidade};
     }
   }catch(err){
-    // ─── FIX: loga o erro real (antes só logava err.message) ─────────────────
-    console.error('Erro planilha completo:', err);
+    console.error('Erro planilha:', err.message, err.stack);
     return null;
   }
 }
@@ -550,11 +537,9 @@ async function zerarCliente(nomeDigitado){
 
 const PALAVRAS_RESERVADAS=new Set(['pagou','pix','transferiu','depositou','mandou','enviou','cancelar','saldo','historico','relatorio','resumo','cobrar','lembrete','lembretes','preco','produtos','zerar','novo']);
 
-// ─── FIX: parsearLinha agora remove aspas antes de processar ─────────────────
 function parsearLinha(linha){
-  // Remove aspas tipograficas, normais e de voz antes de qualquer processamento
   const semAspas = linha.replace(/["""''`]/g, '');
-  const limpa=semAspas.replace(/[.!?,;:]+(\\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
+  const limpa=semAspas.replace(/[.!?,;:]+(\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
   const palavrasOrig=limpa.split(' ').filter(Boolean);const palavrasNorm=palavrasOrig.map(norm);const n=palavrasNorm.length;let inicioItens=-1;
   for(let i=0;i<n;i++){const p1=toProduto(palavrasNorm[i]);if(p1){inicioItens=i;break;}const qtd=toNumero(palavrasNorm[i]);if(qtd!==null&&i+1<n){const ok2=i+2<n&&toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]);const ok1=toProduto(palavrasNorm[i+1]);if(ok2||ok1){inicioItens=i;break;}}}
   if(inicioItens<1) return null;
@@ -566,7 +551,6 @@ function parsearLinha(linha){
 }
 
 function parsearPagamento(linha){
-  // Remove aspas tipograficas antes de processar
   linha = linha.replace(/["""''`]/g, '');
   const tNorm=norm(linha);if(!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
   const kwMatch=tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);if(!kwMatch) return null;
@@ -582,7 +566,6 @@ function parsearPagamento(linha){
 }
 
 function detectarComando(texto){
-  // Remove aspas antes de detectar comando
   texto = texto.replace(/["""''`]/g, '');
   const t=norm(texto);
   if(t.includes('compras quitadas')||t==='quitadas') return{tipo:'quitadas'};
@@ -665,7 +648,6 @@ async function iniciarBot(){
     sock.ev.on('creds.update',async()=>{await saveCreds();await salvarSessaoNoRender();});
 
     sock.ev.on('connection.update',async({connection,lastDisconnect,qr})=>{
-      // qr ignorado — usamos pairing code via formulario
       if(connection==='open'){
         botConectado=true;pairingCode=null;pairingErro=null;reconectando=false;
         console.log('\u2705 Bot conectado!');
