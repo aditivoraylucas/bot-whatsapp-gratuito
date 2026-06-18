@@ -176,13 +176,12 @@ function capitalizarNome(n){if(!n) return '';return n.trim().split(' ').map(p=>p
 function emojiProduto(produto){if(produto==='bolo') return '\ud83c\udf82';if(produto==='trufa') return '\ud83c\udf6b';return '\ud83e\udee4';}
 function nomeProdutoExib(produto){if(produto==='bolo') return 'Bolo';if(produto==='trufa') return 'Trufa';return capitalizarNome(produto.replace(/_/g,' '));}
 
-let botConectado = false;
-let qrCodeData   = null;
-let pairingCode  = null;
-let sockGlobal   = null;
+let botConectado    = false;
+let qrCodeData     = null;
+let pairingCode    = null;
+let sockGlobal     = null;
 let jidGrupoGlobal = null;
 let agendamentosIniciados = false;
-let pairingRequested = false;
 
 function restaurarSessao(){
   try{
@@ -226,26 +225,26 @@ http.createServer(async(req,res)=>{
     <h1 style="color:#128C7E;margin-bottom:4px">\ud83d\udcf1 Conectar WhatsApp</h1>
     <p style="color:#555;margin-bottom:24px">Escolha uma das formas abaixo</p>
 
-    ${qrImage ? `
-    <div style="margin-bottom:28px">
-      <p style="font-weight:700;color:#333;margin-bottom:10px">1\ufe0f\u20e3 Escanear QR Code</p>
-      <p style="color:#777;font-size:13px;margin-bottom:12px">WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
-      <img src="${qrImage}" style="width:260px;height:260px;border:4px solid #25D366;border-radius:12px;display:block;margin:0 auto"/>
-    </div>
-    <hr style="border:none;border-top:2px dashed #eee;margin:0 0 24px"/>
-    ` : '<p style="color:#aaa;margin-bottom:20px">Gerando QR Code...</p>'}
-
     ${codeExib ? `
-    <div>
-      <p style="font-weight:700;color:#333;margin-bottom:6px">2\ufe0f\u20e3 Ou use o C\u00f3digo de Pareamento</p>
+    <div style="margin-bottom:28px">
+      <p style="font-weight:700;color:#333;margin-bottom:6px">1\ufe0f\u20e3 C\u00f3digo de Pareamento</p>
       <p style="color:#777;font-size:13px;margin-bottom:14px">WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho \u2192 <b>Usar c\u00f3digo do celular</b></p>
-      <div id="pc" style="background:#f0fff4;border:3px solid #25D366;border-radius:12px;padding:18px;font-family:monospace;font-size:32px;font-weight:900;letter-spacing:8px;color:#128C7E;margin-bottom:14px">${codeExib}</div>
+      <div id="pc" style="background:#f0fff4;border:3px solid #25D366;border-radius:12px;padding:18px;font-family:monospace;font-size:36px;font-weight:900;letter-spacing:10px;color:#128C7E;margin-bottom:14px">${codeExib}</div>
       <button onclick="navigator.clipboard.writeText('${codeExib}').then(()=>{this.innerText='\u2705 Copiado!';setTimeout(()=>this.innerText='\ud83d\udccb Copiar c\u00f3digo',2000)})"
         style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:10px 28px;font-size:15px;cursor:pointer;font-weight:700">\ud83d\udccb Copiar c\u00f3digo</button>
     </div>
-    ` : '<p style="color:#aaa;font-size:13px;margin-top:16px">Gerando c\u00f3digo de pareamento...</p>'}
+    <hr style="border:none;border-top:2px dashed #eee;margin:0 0 24px"/>
+    ` : ''}
 
-    <p style="color:#bbb;font-size:11px;margin-top:24px">P\u00e1gina atualiza automaticamente em 20s</p>
+    ${qrImage ? `
+    <div style="margin-bottom:8px">
+      <p style="font-weight:700;color:#333;margin-bottom:10px">2\ufe0f\u20e3 Ou escaneie o QR Code</p>
+      <p style="color:#777;font-size:13px;margin-bottom:12px">WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
+      <img src="${qrImage}" style="width:240px;height:240px;border:4px solid #25D366;border-radius:12px;display:block;margin:0 auto"/>
+    </div>
+    ` : `<p style="color:#aaa;margin:20px 0">\u23f3 Gerando QR Code e c\u00f3digo...</p>`}
+
+    <p style="color:#bbb;font-size:11px;margin-top:20px">P\u00e1gina atualiza automaticamente em 20s</p>
   </div>
   <script>setTimeout(()=>location.reload(),20000)</script>
 </body></html>`);
@@ -596,36 +595,62 @@ async function iniciarBot(){
     const{version}=await fetchLatestBaileysVersion();
     const{state,saveCreds}=await useMultiFileAuthState(AUTH_DIR);
     const logger=pino({level:'silent'});
-    const sock=makeWASocket({version,auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,logger)},printQRInTerminal:false,logger,browser:Browsers.ubuntu('Chrome'),connectTimeoutMs:120000,defaultQueryTimeoutMs:60000,keepAliveIntervalMs:10000,retryRequestDelayMs:2000,maxMsgRetryCount:5});
+
+    // ─── USA PAIRING CODE: não gerar QR, solicitar código por número ───────
+    const usePairingCode = !!WHATSAPP_NUMBER;
+
+    const sock=makeWASocket({
+      version,
+      auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,logger)},
+      printQRInTerminal: !usePairingCode,
+      logger,
+      browser: Browsers.ubuntu('Chrome'),
+      connectTimeoutMs:120000,
+      defaultQueryTimeoutMs:60000,
+      keepAliveIntervalMs:10000,
+      retryRequestDelayMs:2000,
+      maxMsgRetryCount:5
+    });
     sockGlobal=sock;
+
     sock.ev.on('creds.update',async()=>{await saveCreds();await salvarSessaoNoRender();});
+
     sock.ev.on('connection.update',async({connection,lastDisconnect,qr})=>{
+      // Pairing code: solicitar assim que o socket estiver pronto (qr aparece quando não autenticado)
       if(qr){
-        qrCodeData=qr;
-        console.log('QR Code gerado');
-        // Gera pairing code assim que o QR aparecer
-        if(!pairingRequested&&WHATSAPP_NUMBER){
-          pairingRequested=true;
-          try{
-            const code=await sock.requestPairingCode(WHATSAPP_NUMBER);
-            pairingCode=code;
-            console.log('Pairing code gerado:',code);
-          }catch(e){console.error('Erro ao gerar pairing code:',e.message);}
-        }
+        qrCodeData = qr;
+        console.log('QR Code gerado (fallback)');
       }
-      if(connection==='close'){
-        botConectado=false;reconectando=false;pairingRequested=false;pairingCode=null;qrCodeData=null;
-        const code=(lastDisconnect?.error instanceof Boom)?lastDisconnect.error.output?.statusCode:null;
-        console.log(`Conexao fechada. Codigo: ${code}`);
-        if(code===DisconnectReason.loggedOut){try{fs.rmSync(AUTH_DIR,{recursive:true,force:true});}catch(e){}}
-        setTimeout(iniciarBot,5000);
-      }else if(connection==='open'){
+
+      if(connection==='open'){
         botConectado=true;qrCodeData=null;pairingCode=null;reconectando=false;
         console.log('\u2705 Bot conectado!');
         salvarSessaoNoRender();
         if(jidGrupoGlobal) agendarTarefas(sock,jidGrupoGlobal);
       }
+
+      if(connection==='close'){
+        botConectado=false;reconectando=false;pairingCode=null;qrCodeData=null;
+        const code=(lastDisconnect?.error instanceof Boom)?lastDisconnect.error.output?.statusCode:null;
+        console.log(`Conexao fechada. Codigo: ${code}`);
+        if(code===DisconnectReason.loggedOut){try{fs.rmSync(AUTH_DIR,{recursive:true,force:true});}catch(e){}}
+        setTimeout(iniciarBot,5000);
+      }
     });
+
+    // ─── Solicitar pairing code logo após criar o socket ──────────────────
+    if(usePairingCode && !sock.authState.creds.registered){
+      // Aguarda o socket estar pronto para aceitar o pedido
+      await new Promise(r => setTimeout(r, 3000));
+      try{
+        const code = await sock.requestPairingCode(WHATSAPP_NUMBER);
+        pairingCode = code;
+        console.log('\u2705 Pairing code gerado:', code);
+      }catch(e){
+        console.error('Erro ao gerar pairing code:', e.message);
+      }
+    }
+
     sock.ev.on('messages.upsert',async({messages})=>{
       for(const msg of messages){
         try{
