@@ -124,9 +124,12 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
+// ─── FIX: norm() agora remove aspas, aspas tipograficas e outros caracteres
+//          que o WhatsApp injeta ao formatar mensagens de audio/texto ──────────
 function norm(t) {
   return (t||'')
-    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g,'')
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g,'')   // caracteres invisíveis
+    .replace(/["""''`]/g,'')                        // aspas normais e tipográficas
     .toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
 }
 
@@ -296,7 +299,16 @@ async function getSheetHistorico(){
 
 async function registrarOuAcumular(clienteEnviado,produto,quantidade){
   try{
-    const sheet=await getSheetSaldo();const rows=await sheet.getRows();
+    const sheet=await getSheetSaldo();
+
+    // ─── FIX: garante que o cabeçalho existe antes de buscar linhas ──────────
+    let headers;
+    try { headers = sheet.headerValues; } catch(e) { headers = null; }
+    if(!headers || !headers.length){
+      await sheet.setHeaderRow(['Cliente','Produto','Quantidade','Total','UltimaCompra']);
+    }
+
+    const rows=await sheet.getRows();
     const precoAtual=PRECOS[produto]||0;const valorNovo=precoAtual*quantidade;
     const existente=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
     const cliente=existente?existente.get('Cliente'):capitalizarNome(clienteEnviado);
@@ -317,7 +329,11 @@ async function registrarOuAcumular(clienteEnviado,produto,quantidade){
       await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
       return{cliente,totalAcumulado:valorNovo,qtdAcumulada:quantidade};
     }
-  }catch(err){console.error('Erro planilha:',err.message);return null;}
+  }catch(err){
+    // ─── FIX: loga o erro real (antes só logava err.message) ─────────────────
+    console.error('Erro planilha completo:', err);
+    return null;
+  }
 }
 
 async function cancelarLancamento(jid,nomeDigitado){
@@ -513,7 +529,7 @@ async function verificarLembretes(sock,jid){
 
 function mudarPreco(produto,novoPreco){const p=toProduto(produto);if(!p) return `\u274c Produto *${produto}* nao encontrado.`;const precoAntigo=PRECOS[p]||0;PRECOS[p]=novoPreco;salvarPrecos();return `\u2705 Preco de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} \u2192 R$ ${novoPreco.toFixed(2)}\n_Saldos existentes nao foram alterados. Vale para novas compras._`;}
 
-function cadastrarNovoProduto(nomeProduto,preco){const key=norm(nomeProduto).replace(/\s+/g,'_');if(PRECOS[key]!==undefined) return `\u26a0\ufe0f Produto *${nomeProduto}* ja existe. Para mudar o preco: _preco ${nomeProduto} R$XX_`;PRECOS[key]=preco;SINONIMOS_EXTRA[key]=[norm(nomeProduto),nomeProduto.toLowerCase().trim()];SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];salvarPrecos();salvarSinonimosExtra();return `\u2705 Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;}
+function cadastrarNovoProduto(nomeProduto,preco){const key=norm(nomeProduto).replace(/\s+/g,'_');if(PRECOS[key]!==undefined) return `\u26a0\ufe0f Produto *${nomeProduto}* ja existe. Para mudar o preco: _preco ${nomeProduto} R$XX_`;PRECOS[key]=preco;SINONIMOS_EXTRA[key]=[norm(nomeProduto),nomeProduto.toLowerCase().trim()];SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];salvarPrecos();salvarSinonimosExtra();return `\u2705 Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _\"cliente nome ${norm(nomeProduto)}\"_`;}
 
 function listarProdutos(){const todos=todosOsSinonimos();let msg='*Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';for(const [key] of Object.entries(todos)){const preco=PRECOS[key];if(preco===undefined) continue;msg+=`${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;}msg+='\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_Para mudar o preco: preco [produto] [valor]_';return msg;}
 
@@ -534,8 +550,11 @@ async function zerarCliente(nomeDigitado){
 
 const PALAVRAS_RESERVADAS=new Set(['pagou','pix','transferiu','depositou','mandou','enviou','cancelar','saldo','historico','relatorio','resumo','cobrar','lembrete','lembretes','preco','produtos','zerar','novo']);
 
+// ─── FIX: parsearLinha agora remove aspas antes de processar ─────────────────
 function parsearLinha(linha){
-  const limpa=linha.replace(/[.!?,;:]+(\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
+  // Remove aspas tipograficas, normais e de voz antes de qualquer processamento
+  const semAspas = linha.replace(/["""''`]/g, '');
+  const limpa=semAspas.replace(/[.!?,;:]+(\\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
   const palavrasOrig=limpa.split(' ').filter(Boolean);const palavrasNorm=palavrasOrig.map(norm);const n=palavrasNorm.length;let inicioItens=-1;
   for(let i=0;i<n;i++){const p1=toProduto(palavrasNorm[i]);if(p1){inicioItens=i;break;}const qtd=toNumero(palavrasNorm[i]);if(qtd!==null&&i+1<n){const ok2=i+2<n&&toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]);const ok1=toProduto(palavrasNorm[i+1]);if(ok2||ok1){inicioItens=i;break;}}}
   if(inicioItens<1) return null;
@@ -547,6 +566,8 @@ function parsearLinha(linha){
 }
 
 function parsearPagamento(linha){
+  // Remove aspas tipograficas antes de processar
+  linha = linha.replace(/["""''`]/g, '');
   const tNorm=norm(linha);if(!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
   const kwMatch=tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);if(!kwMatch) return null;
   const keyword=kwMatch[1];const palavrasNorm=tNorm.split(/\s+/).filter(Boolean);const palavrasOrig=linha.trim().split(/\s+/).filter(Boolean);
@@ -561,6 +582,8 @@ function parsearPagamento(linha){
 }
 
 function detectarComando(texto){
+  // Remove aspas antes de detectar comando
+  texto = texto.replace(/["""''`]/g, '');
   const t=norm(texto);
   if(t.includes('compras quitadas')||t==='quitadas') return{tipo:'quitadas'};
   if(t.includes('relatorio detalhado')) return{tipo:'detalhado'};
@@ -674,7 +697,7 @@ async function iniciarBot(){
               const buffer=await downloadMediaMessage(msg,'buffer',{},{logger,reuploadRequest:sock.updateMediaMessage});
               const mimeType=audioMsg.mimetype||'audio/ogg; codecs=opus';
               const textoRaw=await transcreverAudio(buffer,mimeType);
-              if(textoRaw){const textoTranscrito=corrigirTranscricao(limparTranscricao(textoRaw));console.log('Transcricao:',textoRaw);if(textoRaw!==textoTranscrito) console.log('Transcricao corrigida:',textoTranscrito);const resposta=await processarTexto(textoTranscrito,jid,sock);if(resposta){await sock.sendMessage(jid,{text:`\ud83c\udfa4 _"${textoRaw}"_\n\n${resposta}`});}}
+              if(textoRaw){const textoTranscrito=corrigirTranscricao(limparTranscricao(textoRaw));console.log('Transcricao:',textoRaw);if(textoRaw!==textoTranscrito) console.log('Transcricao corrigida:',textoTranscrito);const resposta=await processarTexto(textoTranscrito,jid,sock);if(resposta){await sock.sendMessage(jid,{text:`\ud83c\udfa4 _"${textoRaw}"_\n\n${resposta}`;}}
             }catch(e){console.error('Erro ao processar audio:',e.message);}
             continue;
           }
