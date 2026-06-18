@@ -8,7 +8,6 @@ const path = require('path');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const http = require('http');
-const qrcode = require('qrcode');
 const pino = require('pino');
 const FormData = require('form-data');
 
@@ -22,6 +21,117 @@ const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID|| '';
 const GROQ_API_KEY     = process.env.GROQ_API_KEY     || '';
 
 const AUTH_DIR = 'auth_info';
+
+// ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
+let botConectado = false;
+let pairingCode  = null;   // código de 8 dígitos
+let pairingPhone = null;   // número que solicitou o código
+let sockGlobal   = null;
+let jidGrupoGlobal = null;
+let agendamentosIniciados = false;
+let reconectando = false;
+
+// ─── SERVIDOR HTTP (formulário + pairing code) ────────────────────────────────
+http.createServer(async (req, res) => {
+  try {
+    // POST /solicitar-codigo  body: phone=5511999999999
+    if (req.method === 'POST' && req.url === '/solicitar-codigo') {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        const params  = new URLSearchParams(body);
+        const phone   = (params.get('phone') || '').replace(/\D/g, '');
+        if (!phone || phone.length < 10) {
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(paginaFormulario('⚠️ Número inválido. Tente novamente.', ''));
+          return;
+        }
+        if (botConectado) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(paginaFormulario('✅ Bot já está conectado!', ''));
+          return;
+        }
+        if (!sockGlobal) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(paginaFormulario('⏳ Bot ainda iniciando. Aguarde 10s e tente novamente.', ''));
+          return;
+        }
+        try {
+          const code = await sockGlobal.requestPairingCode(phone);
+          pairingCode  = code;
+          pairingPhone = phone;
+          console.log(`Pairing code para ${phone}: ${code}`);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(paginaFormulario('', code));
+        } catch (e) {
+          console.error('Erro ao gerar pairing code:', e.message);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(paginaFormulario('❌ Erro ao gerar código: ' + e.message, ''));
+        }
+      });
+      return;
+    }
+
+    // GET /  →  página principal
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    if (botConectado) {
+      res.end(paginaConectado());
+    } else {
+      res.end(paginaFormulario('', pairingCode || ''));
+    }
+  } catch (e) {
+    res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');
+  }
+}).listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
+
+// ─── TEMPLATES HTML ───────────────────────────────────────────────────────────
+function paginaConectado() {
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bot WhatsApp</title>
+  <style>body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f0f2f5}
+  .card{background:#fff;border-radius:16px;padding:40px;box-shadow:0 4px 24px #0001;text-align:center;max-width:400px;width:90%}
+  h1{color:#25D366}p{color:#555}</style></head>
+  <body><div class="card"><h1>✅ Bot Conectado!</h1><p>Funcionando normalmente.</p></div></body></html>`;
+}
+
+function paginaFormulario(erro, codigo) {
+  const codigoHTML = codigo
+    ? `<div class="code-box">
+        <p class="label">Seu código de vinculação:</p>
+        <div class="code">${codigo}</div>
+        <p class="instrucoes">📱 No WhatsApp: <strong>Configurações → Aparelhos conectados → Conectar com número de telefone</strong> e digite o código acima.</p>
+       </div>`
+    : '';
+  const erroHTML = erro ? `<p class="erro">${erro}</p>` : '';
+
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Conectar Bot WhatsApp</title>
+  <style>
+    body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f0f2f5}
+    .card{background:#fff;border-radius:16px;padding:40px;box-shadow:0 4px 24px #0001;text-align:center;max-width:420px;width:90%}
+    h1{color:#25D366;margin-bottom:8px}p.sub{color:#888;margin-bottom:24px;font-size:14px}
+    input[type=tel]{width:100%;padding:12px 16px;border:2px solid #ddd;border-radius:8px;font-size:16px;box-sizing:border-box;outline:none;transition:border .2s}
+    input[type=tel]:focus{border-color:#25D366}
+    button{margin-top:14px;width:100%;padding:13px;background:#25D366;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:700;cursor:pointer;transition:background .2s}
+    button:hover{background:#1da851}
+    .code-box{margin-top:24px;background:#f6fff9;border:2px solid #25D366;border-radius:12px;padding:20px}
+    .code{font-size:36px;font-weight:900;letter-spacing:8px;color:#25D366;margin:8px 0}
+    .label{color:#555;font-size:13px;margin:0}.instrucoes{font-size:13px;color:#444;margin-top:10px;line-height:1.5}
+    .erro{color:#e53935;background:#fff3f3;border-radius:8px;padding:10px;font-size:14px;margin-top:12px}
+  </style></head>
+  <body><div class="card">
+    <h1>📱 Conectar Bot</h1>
+    <p class="sub">Digite seu número do WhatsApp para receber o código de vinculação</p>
+    <form method="POST" action="/solicitar-codigo">
+      <input type="tel" name="phone" placeholder="Ex: 5511999999999" required autofocus />
+      <button type="submit">Gerar código</button>
+    </form>
+    ${erroHTML}
+    ${codigoHTML}
+  </div></body></html>`;
+}
 
 // ─── TRANSCRIÇÃO DE ÁUDIO VIA GROQ WHISPER ───────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
@@ -60,56 +170,24 @@ async function transcreverAudio(audioBuffer, mimeType) {
   }
 }
 
-// ─── LIMPAR TEXTO DE TRANSCRIÇÃO ─────────────────────────────────────────────
-// Remove pontuação final das palavras e corrige erros comuns do Whisper
 function limparTranscricao(texto) {
   if (!texto) return texto;
-  // Remove pontuação no fim de cada palavra (ponto, vírgula, exclamação, interrogação)
   return texto
-    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')  // remove pontuação ao final das palavras
+    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-// ─── FUZZY MATCH PARA COMANDOS DE VOZ ────────────────────────────────────────
-// Mapeia palavras que o Whisper erra com frequência para as corretas
 const CORRECOES_VOZ = {
-  // comandos
-  'saudo': 'saldo',
-  'saud': 'saldo',
-  'salvo': 'saldo',
-  'salda': 'saldo',
-  'saldos': 'saldo',
-  'relatorio': 'relatorio',
-  'relatorios': 'relatorio',
-  'relato': 'relatorio',
-  'rezumo': 'resumo',
-  'resuno': 'resumo',
-  'istorico': 'historico',
-  'historico': 'historico',
-  'cancelado': 'cancelar',
-  'cancela': 'cancelar',
-  'cancelas': 'cancelar',
-  'zera': 'zerar',
-  'ajudas': 'ajuda',
-  'produto': 'produtos',
-  // pagamentos
-  'pagou': 'pagou',
-  'pagol': 'pagou',
-  'pago': 'pagou',
-  'pix': 'pix',
-  'pics': 'pix',
-  'pik': 'pix',
-  'transferio': 'transferiu',
-  'transferiou': 'transferiu',
-  // produtos
-  'trufa': 'trufa',
-  'trufas': 'trufas',
-  'trufinha': 'trufinha',
-  'bolo': 'bolo',
-  'bolos': 'bolos',
-  'bombon': 'bombom',
-  'bombons': 'bombons',
+  'saudo':'saldo','saud':'saldo','salvo':'saldo','salda':'saldo','saldos':'saldo',
+  'relatorio':'relatorio','relatorios':'relatorio','relato':'relatorio',
+  'rezumo':'resumo','resuno':'resumo','istorico':'historico','historico':'historico',
+  'cancelado':'cancelar','cancela':'cancelar','cancelas':'cancelar',
+  'zera':'zerar','ajudas':'ajuda','produto':'produtos',
+  'pagou':'pagou','pagol':'pagou','pago':'pagou','pix':'pix','pics':'pix','pik':'pix',
+  'transferio':'transferiu','transferiou':'transferiu',
+  'trufa':'trufa','trufas':'trufas','trufinha':'trufinha',
+  'bolo':'bolo','bolos':'bolos','bombon':'bombom','bombons':'bombons',
 };
 
 function corrigirPalavra(palavra) {
@@ -145,7 +223,6 @@ const NUMEROS_EXTENSO = {
   'dezessete':17,'dezoito':18,'dezenove':19,'vinte':20
 };
 
-// ─── MESES VALIDOS ────────────────────────────────────────────────────────────
 const MESES_VALIDOS = new Set([
   'janeiro','fevereiro','marco','abril','maio','junho',
   'julho','agosto','setembro','outubro','novembro','dezembro',
@@ -157,7 +234,6 @@ function isMes(str) {
   return MESES_VALIDOS.has(n) || /^\d{1,2}$/.test(n);
 }
 
-// ─── HISTORICO DE LANCAMENTOS (cancelar) ──────────────────────────────────────
 const ULTIMOS_LANCAMENTOS = {};
 const MAX_HIST_CANCEL = 10;
 function pushLancamento(jid, obj) {
@@ -166,7 +242,6 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
-// ─── NORMALIZAÇÃO ─────────────────────────────────────────────────────────────
 function norm(t) {
   return (t||'')
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
@@ -176,7 +251,6 @@ function norm(t) {
     .trim();
 }
 
-// ─── FUZZY MATCH ─────────────────────────────────────────────────────────────
 function levenshtein(a, b) {
   const m=a.length, n=b.length;
   const dp=Array.from({length:m+1},(_,i)=>[i]);
@@ -226,7 +300,6 @@ function toProduto(trecho) {
   return null;
 }
 
-// ─── EXTRAIR VALOR MONETÁRIO ──────────────────────────────────────────────────
 function extrairValor(texto) {
   if(!texto) return null;
   const t = norm(texto)
@@ -246,7 +319,6 @@ function extrairValor(texto) {
   return isNaN(val) ? null : val;
 }
 
-// ─── DATA (só dd/mm/aaaa, sem hora) ──────────────────────────────────────────
 function agora() { return new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
 function agoraData() { return new Date().toLocaleDateString('pt-BR',{timeZone:'America/Sao_Paulo'}); }
 function soData(str) {
@@ -259,21 +331,15 @@ function capitalizarNome(n) {
   return n.trim().split(' ').map(p=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join(' ');
 }
 function emojiProduto(produto) {
-  if(produto==='bolo') return '\ud83c\udf82';
-  if(produto==='trufa') return '\ud83c\udf6b';
-  return '\ud83e\udee4';
+  if(produto==='bolo') return '\u{1F382}';
+  if(produto==='trufa') return '\u{1F36B}';
+  return '\u{1FAE4}';
 }
 function nomeProdutoExib(produto) {
   if(produto==='bolo') return 'Bolo';
   if(produto==='trufa') return 'Trufa';
   return capitalizarNome(produto.replace(/_/g,' '));
 }
-
-let botConectado=false;
-let qrCodeData=null;
-let sockGlobal=null;
-let jidGrupoGlobal=null;
-let agendamentosIniciados=false;
 
 function restaurarSessao() {
   try {
@@ -308,25 +374,6 @@ async function salvarSessaoNoRender() {
   } catch(e){console.error('Erro ao salvar sessao:',e.message);}
 }
 
-http.createServer(async(req,res)=>{
-  try {
-    res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
-    if(botConectado){
-      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u2705 Bot conectado!</h1><p>Funcionando normalmente.</p></body></html>');
-    } else if(qrCodeData){
-      const qrImage=await qrcode.toDataURL(qrCodeData).catch(()=>null);
-      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
-        <h1>\ud83d\udcf1 Escanear QR Code</h1>
-        <p>WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
-        ${qrImage?`<img src="${qrImage}" style="width:300px;height:300px;border:4px solid #25D366;border-radius:10px" />`:'<p>Gerando QR...</p>'}
-        <script>setTimeout(()=>location.reload(),25000)</script>
-      </body></html>`);
-    } else {
-      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u23f3 Iniciando bot...</h1><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
-    }
-  } catch(e){res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');}
-}).listen(PORT,()=>console.log(`\u2705 Servidor rodando na porta ${PORT}`));
-
 function getAuth() {
   return new JWT({email:GOOGLE_SERVICE_ACCOUNT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']});
 }
@@ -344,7 +391,6 @@ async function getSheetHistorico() {
   return sheet;
 }
 
-// ─── REGISTRAR COMPRA ─────────────────────────────────────────────────────────
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const sheet=await getSheetSaldo();
@@ -379,7 +425,6 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   } catch(err){console.error('Erro planilha:',err.message);return null;}
 }
 
-// ─── CANCELAR LANCAMENTO ──────────────────────────────────────────────────────
 async function cancelarLancamento(jid, nomeDigitado) {
   try {
     const hist = ULTIMOS_LANCAMENTOS[jid] || [];
@@ -387,7 +432,7 @@ async function cancelarLancamento(jid, nomeDigitado) {
     for(let i=hist.length-1;i>=0;i--){
       if(mesmoNome(hist[i].cliente, nomeDigitado)){ idx=i; break; }
     }
-    if(idx<0) return `\u274c Nenhum lan\u00e7amento recente encontrado para *${capitalizarNome(nomeDigitado)}*.`;
+    if(idx<0) return `❌ Nenhum lançamento recente encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const lanc = hist[idx];
     hist.splice(idx,1);
 
@@ -409,7 +454,7 @@ async function cancelarLancamento(jid, nomeDigitado) {
           await rowsH[i].delete(); break;
         }
       }
-      return `\u2197\ufe0f Lan\u00e7amento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${nomeProdutoExib(lanc.produto)} (R$ ${lanc.valor.toFixed(2)})`;
+      return `↗️ Lançamento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${nomeProdutoExib(lanc.produto)} (R$ ${lanc.valor.toFixed(2)})`;
     }
 
     if(lanc.tipo==='pagamento'){
@@ -432,14 +477,13 @@ async function cancelarLancamento(jid, nomeDigitado) {
           await rowsH[i].delete(); break;
         }
       }
-      return `\u2197\ufe0f Pagamento cancelado: *${lanc.cliente}* - R$ ${lanc.valor.toFixed(2)} devolvido ao saldo.`;
+      return `↗️ Pagamento cancelado: *${lanc.cliente}* - R$ ${lanc.valor.toFixed(2)} devolvido ao saldo.`;
     }
 
-    return '\u274c N\u00e3o foi poss\u00edvel cancelar.';
-  } catch(err){console.error('Erro cancelar:',err.message);return '\u274c Erro ao cancelar lan\u00e7amento.';}
+    return '❌ Não foi possível cancelar.';
+  } catch(err){console.error('Erro cancelar:',err.message);return '❌ Erro ao cancelar lançamento.';}
 }
 
-// ─── PAGAMENTO POR PRODUTO (ex: julia pagou 2 trufas) ─────────────────────────
 async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid) {
   try {
     const sheet=await getSheetSaldo();
@@ -448,7 +492,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
     const cliente=nomeCanon||row?row.get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!row) return{ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
+    if(!row) return{ok:false,msg:`❌ Nenhuma dívida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
     const qtdPaga   = Math.min(quantidade,qtdAtual);
     const novaQtd   = qtdAtual-qtdPaga;
@@ -458,17 +502,16 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
     if(novaQtd===0){
       await row.delete();
-      return{ok:true,msg:`\u2705 *${row.get('Cliente')}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
+      return{ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
     }
     const novoTotal=totalAtual-pago;
     row.set('Quantidade',novaQtd);
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
-    return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
+    return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
 }
 
-// ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
 async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   try {
     const sheet=await getSheetSaldo();
@@ -479,13 +522,13 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       ? rows.filter(r=>r.get('Cliente')===nomeCanon)
       : rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
     const cliente=rowsCliente.length?rowsCliente[0].get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!rowsCliente.length) return{ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
+    if(!rowsCliente.length) return{ok:false,msg:`❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
     const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
     if(valorPago>=totalDevido){
       for(const r of rowsCliente) await r.delete();
-      return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.`};
+      return{ok:true,msg:`✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.`};
     }
     let restante=valorPago;
     for(const r of rowsCliente){
@@ -504,16 +547,15 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
         restante=0;
       }
     }
-    return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
+    return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
 }
 
-// ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
 async function gerarRelatorioGeral() {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
-    if(!rows.length) return 'Nenhuma d\u00edvida em aberto no momento.';
+    if(!rows.length) return 'Nenhuma dívida em aberto no momento.';
     const clientes={};
     for(const row of rows){
       const nome=(row.get('Cliente')||'').trim();
@@ -525,9 +567,9 @@ async function gerarRelatorioGeral() {
       clientes[nome].itens.push({produto,quantidade,total});
       clientes[nome].totalDevido+=total;
     }
-    if(!Object.keys(clientes).length) return 'Nenhuma d\u00edvida em aberto no momento.';
+    if(!Object.keys(clientes).length) return 'Nenhuma dívida em aberto no momento.';
     const ordenados=Object.entries(clientes).sort((a,b)=>b[1].totalDevido-a[1].totalDevido);
-    let resposta='*Relat\u00f3rio de D\u00edvidas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta='*Relatório de Dívidas*\n───────────────\n';
     let totalGeral=0;
     for(const [nome,dados] of ordenados){
       resposta+=`\n*${nome}*\n`;
@@ -537,12 +579,11 @@ async function gerarRelatorioGeral() {
       resposta+=`  *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
       totalGeral+=dados.totalDevido;
     }
-    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    resposta+=`\n───────────────\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
-  } catch(err){console.error('Erro relatorio:',err.message);return '\u274c Erro ao gerar relat\u00f3rio.';}
+  } catch(err){console.error('Erro relatorio:',err.message);return '❌ Erro ao gerar relatório.';}
 }
 
-// ─── HELPER: historico agrupado ───────────────────────────────────────────────
 async function carregarHistoricoAgrupado(filtroMes) {
   const doc=await getDoc();
   const rowsSaldo=await doc.sheetsByIndex[0].getRows();
@@ -590,63 +631,54 @@ async function carregarHistoricoAgrupado(filtroMes) {
   return{historico,saldos};
 }
 
-// ─── RELATORIO DETALHADO (só devedores) ───────────────────────────────────────
 async function gerarRelatorioDetalhado() {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
-    if(!Object.keys(historico).length) return 'Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    if(!Object.keys(historico).length) return 'Nenhuma movimentação registrada ainda.';
     const devedores=Object.keys(historico).filter(n=>(saldos[n]||0)>0);
-    if(!devedores.length) return '\u2705 Nenhuma d\u00edvida em aberto! Todos quitados.';
+    if(!devedores.length) return '✅ Nenhuma dívida em aberto! Todos quitados.';
     devedores.sort((a,b)=>(saldos[b]||0)-(saldos[a]||0));
-    let resposta='*Relat\u00f3rio Detalhado*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta='*Relatório Detalhado*\n───────────────\n';
     let totalGeral=0;
     for(const nome of devedores){
       const movs=historico[nome];
       const saldoAtual=saldos[nome]||0;
       resposta+=`\n*${nome}*\n`;
       for(const m of movs){
-        if(m.tipo==='Compra'){
-          resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        } else if(m.tipo==='Pagamento'){
-          resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        }
+        if(m.tipo==='Compra') resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
+        else if(m.tipo==='Pagamento') resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
       }
       resposta+=`  *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
       totalGeral+=saldoAtual;
     }
-    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    resposta+=`\n───────────────\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
     return resposta;
-  } catch(err){console.error('Erro relatorio detalhado:',err.message);return '\u274c Erro ao gerar relat\u00f3rio detalhado.';}
+  } catch(err){console.error('Erro relatorio detalhado:',err.message);return '❌ Erro ao gerar relatório detalhado.';}
 }
 
-// ─── COMPRAS QUITADAS ─────────────────────────────────────────────────────────
 async function gerarRelatorioQuitados() {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
-    if(!Object.keys(historico).length) return 'Nenhuma movimenta\u00e7\u00e3o registrada ainda.';
+    if(!Object.keys(historico).length) return 'Nenhuma movimentação registrada ainda.';
     const quitados=Object.keys(historico).filter(n=>!(saldos[n]>0));
     if(!quitados.length) return 'Nenhum cliente quitado ainda.';
     quitados.sort();
-    let resposta='*Compras Quitadas*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+    let resposta='*Compras Quitadas*\n───────────────\n';
     for(const nome of quitados){
       const movs=historico[nome];
       const totalPago=movs.filter(m=>m.tipo==='Pagamento').reduce((s,m)=>s+m.valor,0);
       resposta+=`\n*${nome}*\n`;
       for(const m of movs){
-        if(m.tipo==='Compra'){
-          resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        } else if(m.tipo==='Pagamento'){
-          resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        }
+        if(m.tipo==='Compra') resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
+        else if(m.tipo==='Pagamento') resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
       }
-      resposta+=`  \u2705 Quitado | Total pago: R$ ${totalPago.toFixed(2)}\n`;
+      resposta+=`  ✅ Quitado | Total pago: R$ ${totalPago.toFixed(2)}\n`;
     }
-    resposta+=`\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2705 *${quitados.length} cliente(s) com conta quitada*`;
+    resposta+=`\n───────────────\n✅ *${quitados.length} cliente(s) com conta quitada*`;
     return resposta;
-  } catch(err){console.error('Erro relatorio quitados:',err.message);return '\u274c Erro ao gerar relat\u00f3rio de quitados.';}
+  } catch(err){console.error('Erro relatorio quitados:',err.message);return '❌ Erro ao gerar relatório de quitados.';}
 }
 
-// ─── SALDO INDIVIDUAL ─────────────────────────────────────────────────────────
 async function gerarSaldoIndividual(nomeDigitado) {
   try {
     const sheet=await getSheetSaldo();
@@ -657,13 +689,13 @@ async function gerarSaldoIndividual(nomeDigitado) {
       const{historico,saldos}=await carregarHistoricoAgrupado();
       const nomeHist=resolverNome(nomeDigitado,Object.keys(historico));
       if(nomeHist && !(saldos[nomeHist]>0))
-        return `\u2705 *${nomeHist}* n\u00e3o tem d\u00edvidas em aberto. Conta quitada!`;
-      return `\u274c Nenhuma movimenta\u00e7\u00e3o encontrada para *${capitalizarNome(nomeDigitado)}*.`;
+        return `✅ *${nomeHist}* não tem dívidas em aberto. Conta quitada!`;
+      return `❌ Nenhuma movimentação encontrada para *${capitalizarNome(nomeDigitado)}*.`;
     }
     const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
-    if(!rowsCliente.length) return `\u2705 *${nomeCanon}* n\u00e3o tem d\u00edvidas em aberto.`;
+    if(!rowsCliente.length) return `✅ *${nomeCanon}* não tem dívidas em aberto.`;
     let totalDevido=0;
-    let resposta=`*${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    let resposta=`*${nomeCanon}*\n───────────────\n`;
     for(const row of rowsCliente){
       const produto=norm(row.get('Produto')||'');
       const qtd=parseInt(row.get('Quantidade')||'0');
@@ -671,50 +703,39 @@ async function gerarSaldoIndividual(nomeDigitado) {
       resposta+=`${nomeProdutoExib(produto)}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;
       totalDevido+=total;
     }
-    resposta+=`\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n*Total devido: R$ ${totalDevido.toFixed(2)}*`;
+    resposta+=`───────────────\n*Total devido: R$ ${totalDevido.toFixed(2)}*`;
     return resposta;
-  } catch(err){console.error('Erro saldo:',err.message);return '\u274c Erro ao consultar saldo.';}
+  } catch(err){console.error('Erro saldo:',err.message);return '❌ Erro ao consultar saldo.';}
 }
 
-// ─── HISTORICO INDIVIDUAL ─────────────────────────────────────────────────────
 async function gerarHistoricoCliente(nomeDigitado) {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
     const nomesConhecidos=Object.keys(historico);
     const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
-    if(!nomeCanon||!historico[nomeCanon]) return `\u274c Nenhum hist\u00f3rico encontrado para *${capitalizarNome(nomeDigitado)}*.`;
+    if(!nomeCanon||!historico[nomeCanon]) return `❌ Nenhum histórico encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const movs=historico[nomeCanon];
     const saldoAtual=saldos[nomeCanon]||0;
-    let resposta=`*Hist\u00f3rico de ${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    let resposta=`*Histórico de ${nomeCanon}*\n───────────────\n`;
     let totalComprado=0, totalPago=0;
     for(const m of movs){
-      if(m.tipo==='Compra'){
-        resposta+=`Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        totalComprado+=m.valor;
-      } else if(m.tipo==='Pagamento'){
-        resposta+=`Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        totalPago+=m.valor;
-      }
+      if(m.tipo==='Compra'){resposta+=`Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;totalComprado+=m.valor;}
+      else if(m.tipo==='Pagamento'){resposta+=`Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;totalPago+=m.valor;}
     }
-    resposta+=`\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
-    resposta+=`Total comprado: R$ ${totalComprado.toFixed(2)}\n`;
-    resposta+=`Total pago: R$ ${totalPago.toFixed(2)}\n`;
-    resposta+=saldoAtual>0
-      ?`*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`
-      :'\u2705 *Conta quitada!*';
+    resposta+=`───────────────\nTotal comprado: R$ ${totalComprado.toFixed(2)}\nTotal pago: R$ ${totalPago.toFixed(2)}\n`;
+    resposta+=saldoAtual>0?`*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`:'✅ *Conta quitada!*';
     return resposta;
-  } catch(err){console.error('Erro historico:',err.message);return '\u274c Erro ao buscar hist\u00f3rico.';}
+  } catch(err){console.error('Erro historico:',err.message);return '❌ Erro ao buscar histórico.';}
 }
 
-// ─── RELATORIO DO MES ─────────────────────────────────────────────────────────
 async function gerarRelatorioMes(mes) {
   try {
     const{historico}=await carregarHistoricoAgrupado(mes);
-    const nomesMes=['','Janeiro','Fevereiro','Mar\u00e7o','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+    const nomesMes=['','Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
     const mesNum=parseInt(norm(mes));
     const nomeMesExib=isNaN(mesNum)?capitalizarNome(mes):(nomesMes[mesNum]||capitalizarNome(mes));
     const todosNomes=Object.keys(historico);
-    if(!todosNomes.length) return `Nenhuma movimenta\u00e7\u00e3o registrada em ${nomeMesExib}.`;
+    if(!todosNomes.length) return `Nenhuma movimentação registrada em ${nomeMesExib}.`;
     let totalVendas=0, totalRecebido=0, qtdTrufa=0, qtdBolo=0;
     let detalhe='';
     for(const nome of todosNomes.sort()){
@@ -726,11 +747,10 @@ async function gerarRelatorioMes(mes) {
       totalVendas+=comprado; totalRecebido+=pago;
       detalhe+=`\n*${nome}*: comprou R$ ${comprado.toFixed(2)} | pagou R$ ${pago.toFixed(2)}\n`;
     }
-    return `*Relat\u00f3rio de ${nomeMesExib}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n${detalhe}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} unid. | Bolos: ${qtdBolo} unid.\nTotal em vendas: R$ ${totalVendas.toFixed(2)}\nTotal recebido: R$ ${totalRecebido.toFixed(2)}\nA receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
-  } catch(err){console.error('Erro relatorio mes:',err.message);return '\u274c Erro ao gerar relat\u00f3rio do m\u00eas.';}
+    return `*Relatório de ${nomeMesExib}*\n───────────────\n${detalhe}\n───────────────\nTrufas: ${qtdTrufa} unid. | Bolos: ${qtdBolo} unid.\nTotal em vendas: R$ ${totalVendas.toFixed(2)}\nTotal recebido: R$ ${totalRecebido.toFixed(2)}\nA receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
+  } catch(err){console.error('Erro relatorio mes:',err.message);return '❌ Erro ao gerar relatório do mês.';}
 }
 
-// ─── RESUMO DIARIO ────────────────────────────────────────────────────────────
 async function gerarResumoDiario() {
   try {
     const hoje=agoraData();
@@ -753,11 +773,10 @@ async function gerarResumoDiario() {
     const sheetSaldo=await getSheetSaldo();
     const rows=await sheetSaldo.getRows();
     const totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    return `*Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
-  } catch(err){console.error('Erro resumo:',err.message);return '\u274c Erro ao gerar resumo.';}
+    return `*Resumo do Dia - ${hoje}*\n───────────────\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n───────────────\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
+  } catch(err){console.error('Erro resumo:',err.message);return '❌ Erro ao gerar resumo.';}
 }
 
-// ─── LEMBRETE DE COBRANCA ─────────────────────────────────────────────────────
 const DIAS_LEMBRETE = parseInt(process.env.DIAS_LEMBRETE||'7');
 const HORA_LEMBRETE = parseInt(process.env.HORA_LEMBRETE||'20');
 const HORA_RESUMO   = parseInt(process.env.HORA_RESUMO  ||'20');
@@ -783,68 +802,61 @@ async function verificarLembretes(sock, jid) {
         clientes[nome].dias=Math.max(clientes[nome].dias,diasPassados);
       }
     }
-    const nomes=Object.keys(clientes);
-    if(!nomes.length) return;
     for(const [nome,dados] of Object.entries(clientes)){
-      const msg=`\u26a0\ufe0f *Lembrete de cobran\u00e7a*\n*${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
+      const msg=`⚠️ *Lembrete de cobrança*\n*${nome}* está com R$ ${dados.total.toFixed(2)} em aberto há *${dados.dias} dias*.`;
       await sock.sendMessage(jid,{text:msg});
     }
   } catch(e){console.error('Erro lembrete:',e.message);}
 }
 
-// ─── MUDAR PRECO ──────────────────────────────────────────────────────────────
 function mudarPreco(produto, novoPreco) {
   const p=toProduto(produto);
-  if(!p) return `\u274c Produto *${produto}* n\u00e3o encontrado.`;
+  if(!p) return `❌ Produto *${produto}* não encontrado.`;
   const precoAntigo=PRECOS[p]||0;
   PRECOS[p]=novoPreco;
   salvarPrecos();
-  return `\u2705 Pre\u00e7o de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} \u2192 R$ ${novoPreco.toFixed(2)}\n_Saldos existentes n\u00e3o foram alterados. Vale para novas compras._`;
+  return `✅ Preço de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} → R$ ${novoPreco.toFixed(2)}\n_Saldos existentes não foram alterados. Vale para novas compras._`;
 }
 
-// ─── NOVO PRODUTO ─────────────────────────────────────────────────────────────
 function cadastrarNovoProduto(nomeProduto, preco) {
   const key=norm(nomeProduto).replace(/\s+/g,'_');
-  if(PRECOS[key]!==undefined) return `\u26a0\ufe0f Produto *${nomeProduto}* j\u00e1 existe. Para mudar o pre\u00e7o: _preco ${nomeProduto} R$XX_`;
+  if(PRECOS[key]!==undefined) return `⚠️ Produto *${nomeProduto}* já existe. Para mudar o preço: _preco ${nomeProduto} R$XX_`;
   PRECOS[key]=preco;
   SINONIMOS_EXTRA[key]=[norm(nomeProduto), nomeProduto.toLowerCase().trim()];
   SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];
   salvarPrecos();
   salvarSinonimosExtra();
-  return `\u2705 Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;
+  return `✅ Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;
 }
 
-// ─── LISTAR PRODUTOS ──────────────────────────────────────────────────────────
 function listarProdutos() {
   const todos=todosOsSinonimos();
-  let msg='*Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+  let msg='*Produtos cadastrados*\n───────────────\n';
   for(const [key] of Object.entries(todos)){
     const preco=PRECOS[key];
     if(preco===undefined) continue;
     msg+=`${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;
   }
-  msg+='\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_Para mudar o pre\u00e7o: preco [produto] [valor]_';
+  msg+='───────────────\n_Para mudar o preço: preco [produto] [valor]_';
   return msg;
 }
 
-// ─── ZERAR CLIENTE ────────────────────────────────────────────────────────────
 async function zerarCliente(nomeDigitado) {
   try {
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
     const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
     const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
-    if(!nomeCanon) return `\u274c Cliente *${capitalizarNome(nomeDigitado)}* n\u00e3o encontrado.`;
+    if(!nomeCanon) return `❌ Cliente *${capitalizarNome(nomeDigitado)}* não encontrado.`;
     const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
-    if(!rowsCliente.length) return `\u2705 *${nomeCanon}* j\u00e1 est\u00e1 sem d\u00edvidas.`;
+    if(!rowsCliente.length) return `✅ *${nomeCanon}* já está sem dívidas.`;
     const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     for(const r of rowsCliente) await r.delete();
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
-    return `\u2705 D\u00edvida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
-  } catch(err){console.error('Erro zerar:',err.message);return '\u274c Erro ao zerar cliente.';}
+    return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
+  } catch(err){console.error('Erro zerar:',err.message);return '❌ Erro ao zerar cliente.';}
 }
 
-// ─── PARSER DE LINHA (COMPRAS) ────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -853,7 +865,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')  // remove pontuação no final de palavras
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -893,7 +905,6 @@ function parsearLinha(linha) {
   return{nome:capitalizarNome(nomeRaw),itens};
 }
 
-// ─── PARSEAR PAGAMENTO ────────────────────────────────────────────────────────
 function parsearPagamento(linha) {
   const tNorm = norm(linha);
   if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
@@ -913,10 +924,7 @@ function parsearPagamento(linha) {
   const restoNorm = palavrasNorm.slice(kwIdx+1).join(' ').trim();
   const restoOrig = palavrasOrig.slice(kwIdx+1).join(' ').trim();
   const palavrasResto = restoNorm
-    .replace(/\bde\b/g, ' ')
-    .replace(/\bpix\b/g, ' ')
-    .replace(/\breais\b/g, ' ')
-    .replace(/\br\$\s*/g, ' ')
+    .replace(/\bde\b/g, ' ').replace(/\bpix\b/g, ' ').replace(/\breais\b/g, ' ').replace(/\br\$\s*/g, ' ')
     .split(/\s+/).filter(Boolean);
   for (let i = 0; i < palavrasResto.length; i++) {
     const qtd = toNumero(palavrasResto[i]);
@@ -943,59 +951,40 @@ function parsearPagamento(linha) {
   return null;
 }
 
-// ─── DETECTA COMANDO ──────────────────────────────────────────────────────────
 function detectarComando(texto) {
   const t=norm(texto);
-
   if(t.includes('compras quitadas')||t==='quitadas') return{tipo:'quitadas'};
-  if(t.includes('relatorio detalhado')||t.includes('relat\u00f3rio detalhado')) return{tipo:'detalhado'};
-  if(t==='relatorio'||t==='relatorio geral'||t==='relat\u00f3rio'||t==='relat\u00f3rio geral') return{tipo:'geral'};
+  if(t.includes('relatorio detalhado')) return{tipo:'detalhado'};
+  if(t==='relatorio'||t==='relatorio geral') return{tipo:'geral'};
   if(t==='resumo'||t==='resumo do dia'||t==='resumo diario') return{tipo:'resumo'};
   if(t==='produtos'||t==='lista produtos'||t==='listar produtos') return{tipo:'produtos'};
   if(t==='ajuda'||t==='!ajuda'||t==='help') return{tipo:'ajuda'};
-
   const mRelArg=texto.match(/^relat[oó]rio\s+(.+)$/i);
   if(mRelArg){
     const arg=mRelArg[1].trim();
     if(isMes(arg)) return{tipo:'mes',mes:arg};
     return{tipo:'individual',nome:arg};
   }
-
   const mSaldo=texto.match(/^saldo\s+(.+)$/i);
   if(mSaldo) return{tipo:'individual',nome:mSaldo[1].trim()};
-
-  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[oó]rico\s+(.+)$/i);
+  const mHist=texto.match(/^hist[oó]rico\s+(.+)$/i);
   if(mHist) return{tipo:'historico',nome:mHist[1].trim()};
-
   const mCancel=texto.match(/^cancelar\s+(.+)$/i);
   if(mCancel) return{tipo:'cancelar',nome:mCancel[1].trim()};
-
   const mZerar=texto.match(/^zerar\s+(.+)$/i);
   if(mZerar) return{tipo:'zerar',nome:mZerar[1].trim()};
-
   const mPreco=texto.match(/^pre[cç]o\s+(\S+)\s+(.+)$/i);
-  if(mPreco){
-    const val=extrairValor(mPreco[2]);
-    if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};
-  }
-
+  if(mPreco){const val=extrairValor(mPreco[2]);if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};}
   const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-zà-ü\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
-  if(mNovoProd){
-    const val=extrairValor(mNovoProd[2]);
-    if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};
-  }
-
+  if(mNovoProd){const val=extrairValor(mNovoProd[2]);if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};}
   if(t==='cobrar'||t==='lembrete'||t==='lembretes') return{tipo:'lembrete'};
-
   return{tipo:null};
 }
 
-// ─── AJUDA ────────────────────────────────────────────────────────────────────
 function gerarAjuda() {
-  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n_julia transferiu 15_\n_julia mandou 20 reais_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico completo\n_resumo_ \u2014 resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ \u2014 lista produtos e pre\u00e7os\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_novo produto brownie 8_ \u2014 novo produto\n_cancelar julia_ \u2014 cancela \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida de um cliente\n_lembrete_ \u2014 envia cobran\u00e7as manualmente\n\n\ud83c\udfa4 *\u00c1udio:*\n_Envie um \u00e1udio no grupo e o bot transcreve automaticamente!_`;
+  return `🤖 *Comandos do Bot*\n───────────────\n🛒 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n💳 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pagou 2 trufas_\n\n📊 *Relatórios:*\n_relatorio_ — dívidas em aberto\n_relatorio detalhado_ — com histórico\n_relatorio julia_ — saldo de um cliente\n_relatorio junho_ — relatório do mês\n_compras quitadas_ — clientes quitados\n_historico julia_ — histórico completo\n_resumo_ — resumo do dia\n\n🛠 *Administrar:*\n_produtos_ — lista produtos e preços\n_preco trufa 6_ — muda preço\n_novo produto brownie 8_ — novo produto\n_cancelar julia_ — cancela último lançamento\n_zerar julia_ — zera dívida de um cliente\n_lembrete_ — envia cobranças manualmente\n\n🎤 *Áudio:*\n_Envie um áudio no grupo e o bot transcreve automaticamente!_`;
 }
 
-// ─── AGENDAMENTOS ─────────────────────────────────────────────────────────────
 function agendarTarefas(sock, jid) {
   if(agendamentosIniciados) return;
   agendamentosIniciados=true;
@@ -1006,19 +995,12 @@ function agendarTarefas(sock, jid) {
       const hora=now.getHours();
       const min=now.getMinutes();
       if(min>=0&&min<5){
-        if(hora===HORA_RESUMO){
-          const resumo=await gerarResumoDiario();
-          await sock.sendMessage(jid,{text:resumo});
-        }
-        if(hora===HORA_LEMBRETE){
-          await verificarLembretes(sock,jid);
-        }
+        if(hora===HORA_RESUMO){ const resumo=await gerarResumoDiario(); await sock.sendMessage(jid,{text:resumo}); }
+        if(hora===HORA_LEMBRETE){ await verificarLembretes(sock,jid); }
       }
     } catch(e){console.error('Erro agendamento:',e.message);}
   },60*60*1000);
 }
-
-let reconectando=false;
 
 async function processarTexto(texto, jid, sock) {
   const cmd=detectarComando(texto);
@@ -1043,11 +1025,8 @@ async function processarTexto(texto, jid, sock) {
     const pagamento=parsearPagamento(linha);
     if(pagamento){
       let result;
-      if(pagamento.tipo==='valor'){
-        result=await processarPagamentoValor(pagamento.nome,pagamento.valor,jid);
-      } else {
-        result=await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
-      }
+      if(pagamento.tipo==='valor') result=await processarPagamentoValor(pagamento.nome,pagamento.valor,jid);
+      else result=await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
       respostas.push(result.msg);
       continue;
     }
@@ -1057,13 +1036,12 @@ async function processarTexto(texto, jid, sock) {
     for(const item of parsed.itens){
       const resultado=await registrarOuAcumular(parsed.nome,item.produto,item.quantidade);
       if(!resultado){
-        linhasResposta.push(`\u274c Erro ao registrar ${nomeProdutoExib(item.produto)}.`);
+        linhasResposta.push(`❌ Erro ao registrar ${nomeProdutoExib(item.produto)}.`);
       } else if(resultado.limiteBloqueado){
-        linhasResposta.push(`\u26a0\ufe0f *${resultado.cliente}* atingiu o limite de cr\u00e9dito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}! (atual: R$ ${resultado.totalAtual.toFixed(2)})`);
+        linhasResposta.push(`⚠️ *${resultado.cliente}* atingiu o limite de crédito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}!`);
       } else {
         pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:(PRECOS[item.produto]||0)*item.quantidade});
-        const nomeProd=nomeProdutoExib(item.produto);
-        linhasResposta.push(`${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+        linhasResposta.push(`${nomeProdutoExib(item.produto)}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
       }
     }
     if(linhasResposta.length) respostas.push(`*${parsed.nome}*\n`+linhasResposta.join('\n'));
@@ -1082,26 +1060,31 @@ async function iniciarBot() {
     const sock=makeWASocket({
       version,
       auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,logger)},
-      printQRInTerminal:false,logger,
+      printQRInTerminal:false,
+      logger,
       browser:Browsers.ubuntu('Chrome'),
-      connectTimeoutMs:60000,defaultQueryTimeoutMs:60000,
-      keepAliveIntervalMs:15000,retryRequestDelayMs:3000,maxMsgRetryCount:3
+      connectTimeoutMs:60000,
+      defaultQueryTimeoutMs:60000,
+      keepAliveIntervalMs:15000,
+      retryRequestDelayMs:3000,
+      maxMsgRetryCount:3
     });
     sockGlobal=sock;
 
     sock.ev.on('creds.update',async()=>{await saveCreds();await salvarSessaoNoRender();});
 
     sock.ev.on('connection.update',({connection,lastDisconnect,qr})=>{
-      if(qr){qrCodeData=qr;console.log('QR Code gerado');}
+      // ignora QR — usamos pairing code
       if(connection==='close'){
         botConectado=false;reconectando=false;
+        pairingCode=null;
         const code=(lastDisconnect?.error instanceof Boom)?lastDisconnect.error.output?.statusCode:null;
         console.log(`Conexao fechada. Codigo: ${code}`);
         if(code===DisconnectReason.loggedOut){try{fs.rmSync(AUTH_DIR,{recursive:true,force:true});}catch(e){}}
         setTimeout(iniciarBot,5000);
       } else if(connection==='open'){
-        botConectado=true;qrCodeData=null;reconectando=false;
-        console.log('\u2705 Bot conectado!');
+        botConectado=true;pairingCode=null;reconectando=false;
+        console.log('✅ Bot conectado!');
         salvarSessaoNoRender();
         if(jidGrupoGlobal) agendarTarefas(sock,jidGrupoGlobal);
       }
@@ -1121,7 +1104,6 @@ async function iniciarBot() {
             agendarTarefas(sock,jid);
           }
 
-          // ─── MENSAGEM DE ÁUDIO ────────────────────────────────────────────
           const audioMsg = msg.message.audioMessage || msg.message.pttMessage;
           if(audioMsg && GROQ_API_KEY){
             try {
@@ -1130,20 +1112,16 @@ async function iniciarBot() {
               const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
               const textoRaw = await transcreverAudio(buffer, mimeType);
               if(textoRaw){
-                // Limpa pontuação e corrige erros comuns do Whisper
                 const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
                 console.log('Transcrição:', textoRaw);
                 if(textoRaw !== textoTranscrito) console.log('Transcrição corrigida:', textoTranscrito);
                 const resposta = await processarTexto(textoTranscrito, jid, sock);
-                if(resposta){
-                  await sock.sendMessage(jid, { text: `\ud83c\udfa4 _"${textoRaw}"_\n\n${resposta}` });
-                }
+                if(resposta) await sock.sendMessage(jid, { text: `🎤 _"${textoRaw}"_\n\n${resposta}` });
               }
             } catch(e){ console.error('Erro ao processar áudio:', e.message); }
             continue;
           }
 
-          // ─── MENSAGEM DE TEXTO ────────────────────────────────────────────
           let texto=null;
           if(msg.message.conversation) texto=msg.message.conversation;
           else if(msg.message.extendedTextMessage) texto=msg.message.extendedTextMessage.text;
