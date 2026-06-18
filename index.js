@@ -20,8 +20,22 @@ const PORT             = process.env.PORT  || 3000;
 const RENDER_API_KEY   = process.env.RENDER_API_KEY   || '';
 const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID|| '';
 const GROQ_API_KEY     = process.env.GROQ_API_KEY     || '';
+const RENDER_URL       = process.env.RENDER_EXTERNAL_URL || '';
 
 const AUTH_DIR = 'auth_info';
+
+// ─── SELF-PING para evitar que o Render durma ─────────────────────────────────
+if (RENDER_URL) {
+  setInterval(async () => {
+    try {
+      const fetch = (await import('node-fetch')).default;
+      await fetch(RENDER_URL, { method: 'GET', timeout: 10000 });
+      console.log('Self-ping OK');
+    } catch (e) {
+      console.log('Self-ping falhou:', e.message);
+    }
+  }, 14 * 60 * 1000); // a cada 14 minutos
+}
 
 // ─── TRANSCRIÇÃO DE ÁUDIO VIA GROQ WHISPER ───────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
@@ -61,55 +75,27 @@ async function transcreverAudio(audioBuffer, mimeType) {
 }
 
 // ─── LIMPAR TEXTO DE TRANSCRIÇÃO ─────────────────────────────────────────────
-// Remove pontuação final das palavras e corrige erros comuns do Whisper
 function limparTranscricao(texto) {
   if (!texto) return texto;
-  // Remove pontuação no fim de cada palavra (ponto, vírgula, exclamação, interrogação)
   return texto
-    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')  // remove pontuação ao final das palavras
+    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 // ─── FUZZY MATCH PARA COMANDOS DE VOZ ────────────────────────────────────────
-// Mapeia palavras que o Whisper erra com frequência para as corretas
 const CORRECOES_VOZ = {
-  // comandos
-  'saudo': 'saldo',
-  'saud': 'saldo',
-  'salvo': 'saldo',
-  'salda': 'saldo',
-  'saldos': 'saldo',
-  'relatorio': 'relatorio',
-  'relatorios': 'relatorio',
-  'relato': 'relatorio',
-  'rezumo': 'resumo',
-  'resuno': 'resumo',
-  'istorico': 'historico',
-  'historico': 'historico',
-  'cancelado': 'cancelar',
-  'cancela': 'cancelar',
-  'cancelas': 'cancelar',
-  'zera': 'zerar',
-  'ajudas': 'ajuda',
-  'produto': 'produtos',
-  // pagamentos
-  'pagou': 'pagou',
-  'pagol': 'pagou',
-  'pago': 'pagou',
-  'pix': 'pix',
-  'pics': 'pix',
-  'pik': 'pix',
-  'transferio': 'transferiu',
-  'transferiou': 'transferiu',
-  // produtos
-  'trufa': 'trufa',
-  'trufas': 'trufas',
-  'trufinha': 'trufinha',
-  'bolo': 'bolo',
-  'bolos': 'bolos',
-  'bombon': 'bombom',
-  'bombons': 'bombons',
+  'saudo': 'saldo', 'saud': 'saldo', 'salvo': 'saldo', 'salda': 'saldo', 'saldos': 'saldo',
+  'relatorio': 'relatorio', 'relatorios': 'relatorio', 'relato': 'relatorio',
+  'rezumo': 'resumo', 'resuno': 'resumo',
+  'istorico': 'historico', 'historico': 'historico',
+  'cancelado': 'cancelar', 'cancela': 'cancelar', 'cancelas': 'cancelar',
+  'zera': 'zerar', 'ajudas': 'ajuda', 'produto': 'produtos',
+  'pagou': 'pagou', 'pagol': 'pagou', 'pago': 'pagou',
+  'pix': 'pix', 'pics': 'pix', 'pik': 'pix',
+  'transferio': 'transferiu', 'transferiou': 'transferiu',
+  'trufa': 'trufa', 'trufas': 'trufas', 'trufinha': 'trufinha',
+  'bolo': 'bolo', 'bolos': 'bolos', 'bombon': 'bombom', 'bombons': 'bombons',
 };
 
 function corrigirPalavra(palavra) {
@@ -853,7 +839,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')  // remove pontuação no final de palavras
+    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1084,8 +1070,11 @@ async function iniciarBot() {
       auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,logger)},
       printQRInTerminal:false,logger,
       browser:Browsers.ubuntu('Chrome'),
-      connectTimeoutMs:60000,defaultQueryTimeoutMs:60000,
-      keepAliveIntervalMs:15000,retryRequestDelayMs:3000,maxMsgRetryCount:3
+      connectTimeoutMs:120000,
+      defaultQueryTimeoutMs:60000,
+      keepAliveIntervalMs:10000,
+      retryRequestDelayMs:2000,
+      maxMsgRetryCount:5
     });
     sockGlobal=sock;
 
@@ -1130,7 +1119,6 @@ async function iniciarBot() {
               const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
               const textoRaw = await transcreverAudio(buffer, mimeType);
               if(textoRaw){
-                // Limpa pontuação e corrige erros comuns do Whisper
                 const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
                 console.log('Transcrição:', textoRaw);
                 if(textoRaw !== textoTranscrito) console.log('Transcrição corrigida:', textoTranscrito);
