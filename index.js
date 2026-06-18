@@ -301,10 +301,29 @@ http.createServer(async(req,res)=>{
       res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u2705 Bot conectado!</h1><p>Funcionando normalmente.</p></body></html>');
     } else if(qrCodeData){
       const qrImage=await qrcode.toDataURL(qrCodeData).catch(()=>null);
-      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
-        <h1>\ud83d\udcf1 Escanear QR Code</h1>
-        <p>WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
-        ${qrImage?`<img src="${qrImage}" style="width:300px;height:300px;border:4px solid #25D366;border-radius:10px" />`:'<p>Gerando QR...</p>'}
+      // Extrai apenas o código de pareamento (parte antes do primeiro vírgula, se houver)
+      const codigoTexto = qrCodeData.split(',')[0] || qrCodeData;
+      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px;background:#f0f0f0">
+        <div style="max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 20px rgba(0,0,0,0.1)">
+          <h1 style="color:#128C7E;margin-bottom:4px">\ud83d\udcf1 Conectar WhatsApp</h1>
+          <p style="color:#555;margin-bottom:24px">WhatsApp &rarr; Configura&ccedil;&otilde;es &rarr; Aparelhos conectados &rarr; Conectar aparelho</p>
+
+          <p style="font-weight:600;color:#333;margin-bottom:8px">1\ufe0f\u20e3 Escaneie o QR Code:</p>
+          ${qrImage
+            ? `<img src="${qrImage}" style="width:280px;height:280px;border:4px solid #25D366;border-radius:12px;display:block;margin:0 auto 24px" />`
+            : '<p style="color:#999;margin-bottom:24px">Gerando QR...</p>'}
+
+          <hr style="border:none;border-top:1px solid #eee;margin:0 0 20px"/>
+
+          <p style="font-weight:600;color:#333;margin-bottom:8px">2\ufe0f\u20e3 Ou use o c&oacute;digo de texto:</p>
+          <div id="codigo" style="background:#f7f7f7;border:2px dashed #25D366;border-radius:10px;padding:14px 18px;font-family:monospace;font-size:13px;word-break:break-all;color:#222;text-align:left;margin-bottom:12px">${codigoTexto}</div>
+          <button onclick="navigator.clipboard.writeText(document.getElementById('codigo').innerText).then(()=>{this.innerText='\u2705 Copiado!';setTimeout(()=>this.innerText='\ud83d\udccb Copiar c\u00f3digo',2000)})"
+            style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer;font-weight:600">
+            \ud83d\udccb Copiar c&oacute;digo
+          </button>
+
+          <p style="color:#aaa;font-size:12px;margin-top:20px">P&aacute;gina atualiza automaticamente...</p>
+        </div>
         <script>setTimeout(()=>location.reload(),25000)</script>
       </body></html>`);
     } else {
@@ -451,7 +470,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
     return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
 }
 
 // ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
@@ -491,7 +510,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       }
     }
     return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -839,7 +858,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
