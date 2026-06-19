@@ -14,7 +14,7 @@ const FormData = require('form-data');
 const GRUPO_NOME    = process.env.GRUPO_NOME   || 'vendas';
 const SPREADSHEET_ID               = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-const GOOGLE_PRIVATE_KEY           = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const GOOGLE_PRIVATE_KEY           = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const PORT              = process.env.PORT   || 3000;
 const RENDER_API_KEY    = process.env.RENDER_API_KEY    || '';
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
@@ -30,17 +30,16 @@ let sockGlobal         = null;
 let jidGrupoGlobal     = null;
 let agendamentosIniciados = false;
 let reconectando       = false;
-let tentativasReconexao = 0;          // contador para backoff
-const MAX_BACKOFF_MS    = 60_000;     // máximo de 60s entre tentativas
+let tentativasReconexao = 0;
+const MAX_BACKOFF_MS    = 60_000;
 
-// ─── DELAY COM BACKOFF EXPONENCIAL ───────────────────────────────────────
 function delayReconexao() {
   const delay = Math.min(5000 * Math.pow(1.5, tentativasReconexao), MAX_BACKOFF_MS);
   tentativasReconexao++;
   return delay;
 }
 
-// ─── SERVIDOR HTTP (formulário + pairing code) ─────────────────────────────
+// ─── SERVIDOR HTTP ──────────────────────────────────────────────────────
 http.createServer(async (req, res) => {
   try {
     if (req.method === 'POST' && req.url === '/solicitar-codigo') {
@@ -86,7 +85,7 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
 
-// ─── TEMPLATES HTML ───────────────────────────────────────────────────
+// ─── TEMPLATES HTML ──────────────────────────────────────────────────────
 function paginaConectado() {
   return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -313,7 +312,17 @@ async function salvarSessaoNoRender(){
   }catch(e){console.error('Erro ao salvar sessao:',e.message);}
 }
 
-function getAuth(){return new JWT({email:GOOGLE_SERVICE_ACCOUNT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']});}
+// ─── AUTENTICAÇÃO GOOGLE ─────────────────────────────────────────────────────
+// Usa JWT com keyFile simulado para compatibilidade com Node.js 18+ / OpenSSL 3
+function getAuth() {
+  return new JWT({
+    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key:   GOOGLE_PRIVATE_KEY,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    keyAlgorithm: 'RS256',
+  });
+}
+
 async function getDoc(){const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;}
 async function getSheetSaldo(){return(await getDoc()).sheetsByIndex[0];}
 async function getSheetHistorico(){
@@ -665,7 +674,7 @@ async function processarTexto(texto,jid,sock){
   return respostas.length?respostas.join('\n\n'):null;
 }
 
-// ─── INICIAR BOT (com keepalive e reconexão robusta) ──────────────────────────
+// ─── INICIAR BOT ──────────────────────────────────────────────────────────────
 async function iniciarBot(){
   if(reconectando)return;
   reconectando=true;
@@ -681,14 +690,11 @@ async function iniciarBot(){
       printQRInTerminal: false,
       logger,
       browser: Browsers.ubuntu('Chrome'),
-      // ─── Parâmetros de estabilidade ───
       connectTimeoutMs:       60_000,
       defaultQueryTimeoutMs:  60_000,
-      keepAliveIntervalMs:    25_000,   // ping a cada 25s (padrão é muito alto)
+      keepAliveIntervalMs:    25_000,
       retryRequestDelayMs:     2_000,
       maxMsgRetryCount:            5,
-      qrTimeout:              60_000,
-      // Mantém a sessão viva mesmo sem mensagens por longos períodos
       emitOwnEvents:          false,
       fireInitQueries:        true,
       generateHighQualityLinkPreview: false,
@@ -701,51 +707,39 @@ async function iniciarBot(){
 
     sock.ev.on('connection.update',async({connection,lastDisconnect})=>{
       if(connection==='connecting'){console.log('Conectando ao WhatsApp...');}
-
       if(connection==='open'){
         botConectado=true;pairingCode=null;reconectando=false;
-        tentativasReconexao=0;   // reset do backoff após sucesso
+        tentativasReconexao=0;
         console.log('✅ Bot conectado!');
         await salvarSessaoNoRender();
         if(jidGrupoGlobal)agendarTarefas(sock,jidGrupoGlobal);
       }
-
       if(connection==='close'){
         botConectado=false;reconectando=false;pairingCode=null;
         const err=lastDisconnect?.error;
         const code=err instanceof Boom?err.output?.statusCode:null;
-        const motivo=DisconnectReason;
         console.log(`Conexao fechada. Codigo: ${code}`);
-
-        // Se foi deslogado de verdade, limpa a sessão
-        if(code===motivo.loggedOut||code===401){
+        if(code===DisconnectReason.loggedOut||code===401){
           console.log('Sessão expirada. Limpando credenciais...');
           try{fs.rmSync(AUTH_DIR,{recursive:true,force:true});}catch(e){}
           tentativasReconexao=0;
           setTimeout(iniciarBot,3000);
           return;
         }
-
-        // Para erros de conflito (outra sessão aberta), aguarda mais
         if(code===440||code===409){
           console.log('Conflito de sessão. Aguardando 15s...');
           setTimeout(iniciarBot,15_000);
           return;
         }
-
-        // Reconexão com backoff exponencial para qualquer outro erro
         const delay=delayReconexao();
         console.log(`Reconectando em ${Math.round(delay/1000)}s (tentativa ${tentativasReconexao})...`);
         setTimeout(iniciarBot,delay);
       }
     });
 
-    // ─── KEEPALIVE MANUAL: mantém a conexão viva durante longos períodos ociosos
-    // Verifica se ainda está conectado a cada 2 minutos. Se não, reconecta.
     const keepAliveTimer=setInterval(async()=>{
       if(!botConectado||!sockGlobal)return;
       try{
-        // Checa se o socket ainda responde
         await sockGlobal.sendPresenceUpdate('unavailable');
       }catch(e){
         console.log('Keepalive falhou, forçando reconexão...');
@@ -754,7 +748,7 @@ async function iniciarBot(){
         reconectando=false;
         setTimeout(iniciarBot,2000);
       }
-    },2*60*1000);  // a cada 2 minutos
+    },2*60*1000);
 
     sock.ev.on('messages.upsert',async({messages})=>{
       for(const msg of messages){
