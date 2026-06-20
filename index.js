@@ -456,7 +456,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
     const cliente=nomeCanon||row?row.get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!row) return{ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
+    if(!row) return {ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
     const qtdPaga   = Math.min(quantidade,qtdAtual);
     const novaQtd   = qtdAtual-qtdPaga;
@@ -466,14 +466,14 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
     if(novaQtd===0){
       await row.delete();
-      return{ok:true,msg:`\u2705 *${row.get('Cliente')}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
+      return {ok:true,msg:`\u2705 *${row.get('Cliente')}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
     }
     const novoTotal=totalAtual-pago;
     row.set('Quantidade',novaQtd);
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
-    return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
+    return {ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
+  } catch(err){console.error('Erro pag produto:',err.message);return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
 }
 
 // ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
@@ -487,13 +487,13 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       ? rows.filter(r=>r.get('Cliente')===nomeCanon)
       : rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
     const cliente=rowsCliente.length?rowsCliente[0].get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!rowsCliente.length) return{ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
+    if(!rowsCliente.length) return {ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
     const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
     if(valorPago>=totalDevido){
       for(const r of rowsCliente) await r.delete();
-      return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.`};
+      return {ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.`};
     }
     let restante=valorPago;
     for(const r of rowsCliente){
@@ -512,8 +512,8 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
         restante=0;
       }
     }
-    return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
+    return {ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
+  } catch(err){console.error('Erro pag valor:',err.message);return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -861,7 +861,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1079,89 +1079,109 @@ async function processarTexto(texto, jid, sock) {
   return respostas.length ? respostas.join('\n\n') : null;
 }
 
-async function iniciarBot() {
+async function conectarBot() {
   restaurarSessao();
-  const{version}=await fetchLatestBaileysVersion();
-  const{state,saveCreds}=await useMultiFileAuthState(AUTH_DIR);
-  const sock=makeWASocket({
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
+  const sock = makeWASocket({
     version,
-    auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,pino({level:'silent'}))},
-    printQRInTerminal:false,
-    logger:pino({level:'silent'}),
-    browser:Browsers.ubuntu('Chrome'),
-    syncFullHistory:false
+    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
+    browser: Browsers.ubuntu('Chrome'),
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false,
+    syncFullHistory: false,
   });
-  sockGlobal=sock;
-  sock.ev.on('creds.update',async()=>{
+  sockGlobal = sock;
+
+  sock.ev.on('creds.update', async () => {
     await saveCreds();
     await salvarSessaoNoRender();
   });
-  sock.ev.on('connection.update',async(update)=>{
-    const{connection,lastDisconnect,qr}=update;
-    if(qr){qrCodeData=qr;botConectado=false;}
-    if(connection==='open'){
-      botConectado=true;qrCodeData=null;
-      horaConexao=new Date();
-      console.log('\u2705 Bot conectado!');
-      await salvarSessaoNoRender();
-      if(jidGrupoGlobal) agendarTarefas(sock,jidGrupoGlobal);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      qrCodeData = qr;
+      botConectado = false;
+      console.log('QR Code gerado.');
     }
-    if(connection==='close'){
-      botConectado=false;
-      const shouldReconnect=(lastDisconnect?.error instanceof Boom)
-        ?lastDisconnect.error.output?.statusCode!==DisconnectReason.loggedOut
-        :true;
-      if(shouldReconnect){setTimeout(iniciarBot,5000);}
-      else{console.log('Bot desconectado (logout). Reinicie manualmente.');}
+    if (connection === 'open') {
+      botConectado = true;
+      qrCodeData = null;
+      horaConexao = new Date();
+      reconectando = false;
+      console.log('\u2705 Bot conectado ao WhatsApp!');
+      await salvarSessaoNoRender();
+      const grupos = await sock.groupFetchAllParticipating();
+      const gruposArr = Object.values(grupos);
+      const grupoAlvo = gruposArr.find(g => norm(g.subject).includes(norm(GRUPO_NOME)));
+      if (grupoAlvo) {
+        jidGrupoGlobal = grupoAlvo.id;
+        nomeGrupoConectado = grupoAlvo.subject;
+        console.log(`Grupo encontrado: ${grupoAlvo.subject} (${grupoAlvo.id})`);
+        agendarTarefas(sock, jidGrupoGlobal);
+      } else {
+        console.log(`Grupo "${GRUPO_NOME}" nao encontrado. Grupos disponíveis:`);
+        gruposArr.forEach(g => console.log(` - ${g.subject}`));
+      }
+    }
+    if (connection === 'close') {
+      botConectado = false;
+      const statusCode = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
+      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      console.log(`Conexao encerrada. Codigo: ${statusCode}. LoggedOut: ${loggedOut}`);
+      if (loggedOut) {
+        console.log('Sessao expirada. Removendo credenciais...');
+        try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
+      }
+      if (!reconectando) {
+        reconectando = true;
+        const delay = loggedOut ? 3000 : 5000;
+        setTimeout(() => conectarBot(), delay);
+      }
     }
   });
-  sock.ev.on('messages.upsert',async({messages,type})=>{
-    if(type!=='notify') return;
-    for(const msg of messages){
-      if(msg.key.fromMe) continue;
-      const jid=msg.key.remoteJid;
-      if(!jid) continue;
-      const isGrupo=jid.endsWith('@g.us');
-      const nomeGrupoNorm=norm(GRUPO_NOME);
-      if(isGrupo){
-        try{
-          const meta=await sock.groupMetadata(jid);
-          const nomeGrupoAtual=norm(meta.subject);
-          // usa includes para aceitar nomes parciais: "trufa" bate com "Grupo Trufas da Mari"
-          if(!nomeGrupoAtual.includes(nomeGrupoNorm) && nomeGrupoNorm!==nomeGrupoAtual) continue;
-          jidGrupoGlobal=jid;
-          nomeGrupoConectado=meta.subject;
-          agendarTarefas(sock,jid);
-        }catch{continue;}
-      } else {continue;}
-      // Áudio
-      const audioMsg=msg.message?.audioMessage;
-      if(audioMsg){
-        try{
-          const buffer=await downloadMediaMessage(msg,'buffer',{},{logger:pino({level:'silent'}),reuploadRequest:sock.updateMediaMessage});
-          const mimeType=audioMsg.mimetype||'audio/ogg';
-          let texto=await transcreverAudio(buffer,mimeType);
-          if(texto){
-            texto=limparTranscricao(texto);
-            texto=corrigirTranscricao(texto);
-            console.log('[Áudio transcrito]:', texto);
-            const resposta=await processarTexto(texto,jid,sock);
-            if(resposta) await sock.sendMessage(jid,{text:resposta});
-          }
-        }catch(e){console.error('Erro áudio:',e.message);}
-        continue;
-      }
-      const texto=
-        msg.message?.conversation||
-        msg.message?.extendedTextMessage?.text||
-        msg.message?.ephemeralMessage?.message?.conversation||
-        msg.message?.ephemeralMessage?.message?.extendedTextMessage?.text||
-        '';
-      if(!texto) continue;
-      const resposta=await processarTexto(texto,jid,sock);
-      if(resposta) await sock.sendMessage(jid,{text:resposta});
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      try {
+        if (msg.key.fromMe) continue;
+        if (!jidGrupoGlobal || msg.key.remoteJid !== jidGrupoGlobal) continue;
+        if (msg.message?.protocolMessage) continue;
+
+        // Áudio
+        const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+        if (msg.message?.audioMessage && GROQ_API_KEY) {
+          try {
+            const buffer = await downloadMediaMessage(msg, 'buffer', {});
+            const mimeType = msg.message.audioMessage.mimetype || 'audio/ogg';
+            let transcricao = await transcreverAudio(buffer, mimeType);
+            if (transcricao) {
+              transcricao = limparTranscricao(transcricao);
+              transcricao = corrigirTranscricao(transcricao);
+              console.log('Transcricao:', transcricao);
+              const resposta = await processarTexto(transcricao, msg.key.remoteJid, sock);
+              if (resposta) await sock.sendMessage(jidGrupoGlobal, { text: resposta });
+            }
+          } catch(e) { console.error('Erro ao processar audio:', e.message); }
+          continue;
+        }
+
+        const texto = (
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.imageMessage?.caption ||
+          ''
+        ).trim();
+
+        if (!texto) continue;
+        console.log('Mensagem recebida:', texto);
+        const resposta = await processarTexto(texto, msg.key.remoteJid, sock);
+        if (resposta) await sock.sendMessage(jidGrupoGlobal, { text: resposta });
+      } catch(e) { console.error('Erro ao processar mensagem:', e.message); }
     }
   });
 }
 
-iniciarBot().catch(err=>console.error('Erro ao iniciar bot:',err.message));
+conectarBot();
