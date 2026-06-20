@@ -57,10 +57,17 @@ async function comRetry(fn, tentativas = 6, delayMs = 8000) {
         msg.includes('connect ETIMEDOUT') ||
         msg.includes('read ECONNRESET') ||
         msg.includes('getaddrinfo') ||
-        msg.includes('Invalid response body');
+        msg.includes('Invalid response body') ||
+        msg.includes('invalid_grant') ||
+        msg.includes('Could not refresh access token') ||
+        msg.includes('No access') ||
+        msg.includes('token') ||
+        msg.includes('oauth');
       if (reintentavel && i < tentativas - 1) {
         const espera = delayMs * Math.pow(1.5, i);
-        console.log(`Google Sheets: erro de rede (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${Math.round(espera / 1000)}s...`);
+        console.log(`Google Sheets: erro de rede/token (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${Math.round(espera / 1000)}s...`);
+        // Força criação de nova instância JWT na próxima tentativa
+        _jwtInstance = null;
         await new Promise(r => setTimeout(r, espera));
       } else {
         throw err;
@@ -342,15 +349,45 @@ async function salvarSessaoNoRender(){
   }catch(e){console.error('Erro ao salvar sessao:',e.message);}
 }
 
-// ─── AUTENTICAÇÃO GOOGLE ─────────────────────────────────────────────────────
+// ─── AUTENTICAÇÃO GOOGLE COM CACHE E RETRY DE TOKEN ──────────────────────────
+let _jwtInstance = null;
+
 function getAuth() {
-  return new JWT({
-    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key:   GOOGLE_PRIVATE_KEY,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    keyAlgorithm: 'RS256',
-  });
+  if (!_jwtInstance) {
+    _jwtInstance = new JWT({
+      email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      key:   GOOGLE_PRIVATE_KEY,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      keyAlgorithm: 'RS256',
+    });
+  }
+  return _jwtInstance;
 }
+
+// Pré-aquece o token OAuth para evitar "Premature close" na primeira requisição
+async function preAquecerToken() {
+  try {
+    const auth = getAuth();
+    await auth.getAccessToken();
+    console.log('Token OAuth Google pré-aquecido com sucesso.');
+  } catch (e) {
+    console.warn('Aviso: falha ao pré-aquecer token OAuth:', e.message);
+    _jwtInstance = null; // força nova instância na próxima tentativa
+  }
+}
+
+// Renova o token a cada 45 minutos para evitar expiração silenciosa
+setInterval(async () => {
+  try {
+    _jwtInstance = null; // descarta instância antiga
+    const auth = getAuth();
+    await auth.getAccessToken();
+    console.log('Token OAuth Google renovado.');
+  } catch (e) {
+    console.warn('Aviso: falha ao renovar token OAuth:', e.message);
+    _jwtInstance = null;
+  }
+}, 45 * 60 * 1000);
 
 async function getDoc(){return await comRetry(async()=>{const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;});}
 async function getSheetSaldo(){return(await getDoc()).sheetsByIndex[0];}
@@ -433,7 +470,7 @@ async function processarPagamentoProduto(clienteEnviado,quantidade,produto,jid){
       row.set('Quantidade',novaQtd);row.set('Total',(totalAtual-pago).toFixed(2));await row.save();
       return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${(totalAtual-pago).toFixed(2)}`};
     });
-  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
+  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function processarPagamentoValor(clienteEnviado,valorPago,jid){
@@ -458,7 +495,7 @@ async function processarPagamentoValor(clienteEnviado,valorPago,jid){
       }
       return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
     });
-  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
+  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function gerarRelatorioGeral(){
@@ -625,7 +662,7 @@ async function zerarCliente(nomeDigitado){
 const PALAVRAS_RESERVADAS=new Set(['pagou','pix','transferiu','depositou','mandou','enviou','cancelar','saldo','historico','relatorio','resumo','cobrar','lembrete','lembretes','preco','produtos','zerar','novo']);
 
 function parsearLinha(linha){
-  const limpa=linha.replace(/[.!?,;:]+(\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
+  const limpa=linha.replace(/[.!?,;:]+(\\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
   const palavrasOrig=limpa.split(' ').filter(Boolean),palavrasNorm=palavrasOrig.map(norm),n=palavrasNorm.length;
   let inicioItens=-1;
   for(let i=0;i<n;i++){const p1=toProduto(palavrasNorm[i]);if(p1){inicioItens=i;break;}const qtd=toNumero(palavrasNorm[i]);if(qtd!==null&&i+1<n){const ok2=i+2<n&&toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]),ok1=toProduto(palavrasNorm[i+1]);if(ok2||ok1){inicioItens=i;break;}}}
@@ -728,6 +765,10 @@ async function iniciarBot(){
   if(reconectando)return;
   reconectando=true;
   restaurarSessao();
+
+  // Pré-aquece o token OAuth antes de qualquer requisição à planilha
+  await preAquecerToken();
+
   try{
     const{version}=await fetchLatestBaileysVersion();
     const{state,saveCreds}=await useMultiFileAuthState(AUTH_DIR);
@@ -821,24 +862,21 @@ async function iniciarBot(){
                 console.log('Transcrição:',textoRaw);
                 if(textoRaw!==textoTranscrito)console.log('Transcrição corrigida:',textoTranscrito);
                 const resposta=await processarTexto(textoTranscrito,jid,sock);
-                if(resposta)await sock.sendMessage(jid,{text:`🎤 _"${textoRaw}"_\n\n${resposta}`});
+                if(resposta)await sock.sendMessage(jid,{text:`🎤 _"${textoTranscrito}"_\n\n${resposta}`},{quoted:msg});
               }
             }catch(e){console.error('Erro ao processar áudio:',e.message);}
             continue;
           }
 
-          let texto=null;
-          if(msg.message.conversation)texto=msg.message.conversation;
-          else if(msg.message.extendedTextMessage)texto=msg.message.extendedTextMessage.text;
-          if(!texto)continue;
-
-          const resposta=await processarTexto(texto,jid,sock);
-          if(resposta)await sock.sendMessage(jid,{text:resposta});
-        }catch(err){console.error('Erro ao processar mensagem:',err.message);}
+          const texto=msg.message.conversation||msg.message.extendedTextMessage?.text||'';
+          if(!texto.trim())continue;
+          const resposta=await processarTexto(texto.trim(),jid,sock);
+          if(resposta)await sock.sendMessage(jid,{text:resposta},{quoted:msg});
+        }catch(e){console.error('Erro ao processar mensagem:',e.message);}
       }
     });
-  }catch(err){
-    console.error('Erro ao iniciar bot:',err.message);
+  }catch(e){
+    console.error('Erro ao iniciar bot:',e.message);
     reconectando=false;
     const delay=delayReconexao();
     setTimeout(iniciarBot,delay);
