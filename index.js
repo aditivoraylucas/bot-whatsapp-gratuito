@@ -61,20 +61,16 @@ async function transcreverAudio(audioBuffer, mimeType) {
 }
 
 // ─── LIMPAR TEXTO DE TRANSCRIÇÃO ─────────────────────────────────────────────
-// Remove pontuação final das palavras e corrige erros comuns do Whisper
 function limparTranscricao(texto) {
   if (!texto) return texto;
-  // Remove pontuação no fim de cada palavra (ponto, vírgula, exclamação, interrogação)
   return texto
-    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')  // remove pontuação ao final das palavras
+    .replace(/([^\s])([.!?,;:]+)(\s|$)/g, '$1$3')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 // ─── FUZZY MATCH PARA COMANDOS DE VOZ ────────────────────────────────────────
-// Mapeia palavras que o Whisper erra com frequência para as corretas
 const CORRECOES_VOZ = {
-  // comandos
   'saudo': 'saldo',
   'saud': 'saldo',
   'salvo': 'saldo',
@@ -93,7 +89,6 @@ const CORRECOES_VOZ = {
   'zera': 'zerar',
   'ajudas': 'ajuda',
   'produto': 'produtos',
-  // pagamentos
   'pagou': 'pagou',
   'pagol': 'pagou',
   'pago': 'pagou',
@@ -102,7 +97,6 @@ const CORRECOES_VOZ = {
   'pik': 'pix',
   'transferio': 'transferiu',
   'transferiou': 'transferiu',
-  // produtos
   'trufa': 'trufa',
   'trufas': 'trufas',
   'trufinha': 'trufinha',
@@ -274,6 +268,8 @@ let qrCodeData=null;
 let sockGlobal=null;
 let jidGrupoGlobal=null;
 let agendamentosIniciados=false;
+let horaConexao=null;
+let nomeGrupoConectado=null;
 
 function restaurarSessao() {
   try {
@@ -312,7 +308,15 @@ http.createServer(async(req,res)=>{
   try {
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
     if(botConectado){
-      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u2705 Bot conectado!</h1><p>Funcionando normalmente.</p></body></html>');
+      const grupoExib = nomeGrupoConectado || GRUPO_NOME;
+      const horaExib = horaConexao ? horaConexao.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}) : '';
+      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:50px;background:#f0faf0">
+        <h1 style="color:#25D366">\u2705 Bot conectado!</h1>
+        <p style="font-size:18px">Monitorando grupo: <strong>${grupoExib}</strong></p>
+        ${horaExib?`<p style="color:#888;font-size:14px">Conectado desde: ${horaExib}</p>`:''}
+        <p style="color:#555;margin-top:20px">Funcionando normalmente. \ud83d\ude80</p>
+        <script>setTimeout(()=>location.reload(),60000)</script>
+      </body></html>`);
     } else if(qrCodeData){
       const qrImage=await qrcode.toDataURL(qrCodeData).catch(()=>null);
       res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
@@ -853,7 +857,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')  // remove pontuação no final de palavras
+    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1093,6 +1097,7 @@ async function iniciarBot() {
     if(qr){qrCodeData=qr;botConectado=false;}
     if(connection==='open'){
       botConectado=true;qrCodeData=null;
+      horaConexao=new Date();
       console.log('\u2705 Bot conectado!');
       await salvarSessaoNoRender();
       if(jidGrupoGlobal) agendarTarefas(sock,jidGrupoGlobal);
@@ -1119,6 +1124,7 @@ async function iniciarBot() {
           const meta=await sock.groupMetadata(jid);
           if(norm(meta.subject)!==nomeGrupoNorm) continue;
           jidGrupoGlobal=jid;
+          nomeGrupoConectado=meta.subject;
           agendarTarefas(sock,jid);
         }catch{continue;}
       } else {continue;}
