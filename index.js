@@ -282,8 +282,12 @@ function restaurarSessao() {
   } catch(e){console.error('Erro ao restaurar sessao:',e.message);return false;}
 }
 
+let _ultimoSalvamento = 0;
 async function salvarSessaoNoRender() {
   try {
+    const agora2 = Date.now();
+    if (agora2 - _ultimoSalvamento < 60_000) return;
+    _ultimoSalvamento = agora2;
     if(!RENDER_API_KEY||!RENDER_SERVICE_ID) return;
     const credsPath=path.join(AUTH_DIR,'creds.json');
     if(!fs.existsSync(credsPath)) return;
@@ -469,7 +473,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
     return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
 }
 
 // ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
@@ -509,7 +513,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       }
     }
     return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -857,7 +861,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1122,7 +1126,9 @@ async function iniciarBot() {
       if(isGrupo){
         try{
           const meta=await sock.groupMetadata(jid);
-          if(norm(meta.subject)!==nomeGrupoNorm) continue;
+          const nomeGrupoAtual=norm(meta.subject);
+          // usa includes para aceitar nomes parciais: "trufa" bate com "Grupo Trufas da Mari"
+          if(!nomeGrupoAtual.includes(nomeGrupoNorm) && nomeGrupoNorm!==nomeGrupoAtual) continue;
           jidGrupoGlobal=jid;
           nomeGrupoConectado=meta.subject;
           agendarTarefas(sock,jid);
