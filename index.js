@@ -400,8 +400,8 @@ setInterval(async () => {
   }
 }, 10 * 60 * 1000);
 
-// Força reset do JWT antes de cada operação para garantir token fresco
-async function getDoc(){return await comRetry(async()=>{_jwtInstance=null;const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;});}
+// Reutiliza o JWT em cache — reset só acontece em falha (comRetry) ou na renovação periódica
+async function getDoc(){return await comRetry(async()=>{const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;});}
 async function getSheetSaldo(){return(await getDoc()).sheetsByIndex[0];}
 async function getSheetHistorico(){
   const doc=await getDoc();
