@@ -39,6 +39,19 @@ function delayReconexao() {
   return delay;
 }
 
+// ─── DEBOUNCE PARA SALVAR SESSÃO NO RENDER ───────────────────────────────
+// O Baileys dispara creds.update várias vezes por segundo durante a conexão.
+// Sem debounce, cada disparo faria um PUT na API do Render, causando redeploy
+// em loop. Com debounce de 30s, só salva após 30s sem novas atualizações.
+let _salvarSessaoTimer = null;
+function agendarSalvarSessao() {
+  if (_salvarSessaoTimer) clearTimeout(_salvarSessaoTimer);
+  _salvarSessaoTimer = setTimeout(async () => {
+    _salvarSessaoTimer = null;
+    await salvarSessaoNoRender();
+  }, 30_000);
+}
+
 // ─── RETRY PARA GOOGLE SHEETS ────────────────────────────────────────────
 async function comRetry(fn, tentativas = 6, delayMs = 8000) {
   for (let i = 0; i < tentativas; i++) {
@@ -66,7 +79,6 @@ async function comRetry(fn, tentativas = 6, delayMs = 8000) {
       if (reintentavel && i < tentativas - 1) {
         const espera = delayMs * Math.pow(1.5, i);
         console.log(`Google Sheets: erro de rede/token (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${Math.round(espera / 1000)}s...`);
-        // Força criação de nova instância JWT na próxima tentativa
         _jwtInstance = null;
         await new Promise(r => setTimeout(r, espera));
       } else {
@@ -364,7 +376,6 @@ function getAuth() {
   return _jwtInstance;
 }
 
-// Pré-aquece o token OAuth para evitar "Premature close" na primeira requisição
 async function preAquecerToken() {
   try {
     const auth = getAuth();
@@ -372,14 +383,13 @@ async function preAquecerToken() {
     console.log('Token OAuth Google pré-aquecido com sucesso.');
   } catch (e) {
     console.warn('Aviso: falha ao pré-aquecer token OAuth:', e.message);
-    _jwtInstance = null; // força nova instância na próxima tentativa
+    _jwtInstance = null;
   }
 }
 
-// Renova o token a cada 45 minutos para evitar expiração silenciosa
 setInterval(async () => {
   try {
-    _jwtInstance = null; // descarta instância antiga
+    _jwtInstance = null;
     const auth = getAuth();
     await auth.getAccessToken();
     console.log('Token OAuth Google renovado.');
@@ -470,7 +480,7 @@ async function processarPagamentoProduto(clienteEnviado,quantidade,produto,jid){
       row.set('Quantidade',novaQtd);row.set('Total',(totalAtual-pago).toFixed(2));await row.save();
       return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${(totalAtual-pago).toFixed(2)}`};
     });
-  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
+  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};  }
 }
 
 async function processarPagamentoValor(clienteEnviado,valorPago,jid){
@@ -495,7 +505,7 @@ async function processarPagamentoValor(clienteEnviado,valorPago,jid){
       }
       return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
     });
-  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
+  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};  }
 }
 
 async function gerarRelatorioGeral(){
@@ -662,7 +672,7 @@ async function zerarCliente(nomeDigitado){
 const PALAVRAS_RESERVADAS=new Set(['pagou','pix','transferiu','depositou','mandou','enviou','cancelar','saldo','historico','relatorio','resumo','cobrar','lembrete','lembretes','preco','produtos','zerar','novo']);
 
 function parsearLinha(linha){
-  const limpa=linha.replace(/[.!?,;:]+(\\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
+  const limpa=linha.replace(/[.!?,;:]+(\s|$)/g,'$1').replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
   const palavrasOrig=limpa.split(' ').filter(Boolean),palavrasNorm=palavrasOrig.map(norm),n=palavrasNorm.length;
   let inicioItens=-1;
   for(let i=0;i<n;i++){const p1=toProduto(palavrasNorm[i]);if(p1){inicioItens=i;break;}const qtd=toNumero(palavrasNorm[i]);if(qtd!==null&&i+1<n){const ok2=i+2<n&&toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]),ok1=toProduto(palavrasNorm[i+1]);if(ok2||ok1){inicioItens=i;break;}}}
@@ -766,7 +776,6 @@ async function iniciarBot(){
   reconectando=true;
   restaurarSessao();
 
-  // Pré-aquece o token OAuth antes de qualquer requisição à planilha
   await preAquecerToken();
 
   try{
@@ -793,7 +802,12 @@ async function iniciarBot(){
     });
     sockGlobal=sock;
 
-    sock.ev.on('creds.update',async()=>{await saveCreds();await salvarSessaoNoRender();});
+    // creds.update dispara várias vezes por segundo — usamos debounce de 30s
+    // para evitar loop de redeploys no Render
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+      agendarSalvarSessao();
+    });
 
     sock.ev.on('connection.update',async({connection,lastDisconnect})=>{
       if(connection==='connecting'){console.log('Conectando ao WhatsApp...');}
@@ -801,11 +815,14 @@ async function iniciarBot(){
         botConectado=true;pairingCode=null;reconectando=false;
         tentativasReconexao=0;
         console.log('✅ Bot conectado!');
+        // Salva imediatamente ao conectar (só uma vez)
         await salvarSessaoNoRender();
         if(jidGrupoGlobal)agendarTarefas(sock,jidGrupoGlobal);
       }
       if(connection==='close'){
         botConectado=false;reconectando=false;pairingCode=null;
+        // Cancela qualquer salvamento pendente ao desconectar
+        if(_salvarSessaoTimer){clearTimeout(_salvarSessaoTimer);_salvarSessaoTimer=null;}
         const err=lastDisconnect?.error;
         const code=err instanceof Boom?err.output?.statusCode:null;
         console.log(`Conexao fechada. Codigo: ${code}`);
