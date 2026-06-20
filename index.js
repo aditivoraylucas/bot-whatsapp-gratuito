@@ -39,6 +39,24 @@ function delayReconexao() {
   return delay;
 }
 
+// ─── RETRY PARA GOOGLE SHEETS ────────────────────────────────────────────
+async function comRetry(fn, tentativas = 3, delayMs = 2000) {
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err?.message || '';
+      const reintentavel = msg.includes('Premature close') || msg.includes('ECONNRESET') || msg.includes('socket hang up') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed');
+      if (reintentavel && i < tentativas - 1) {
+        console.log(`Google Sheets: erro de rede (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${delayMs}ms...`);
+        await new Promise(r => setTimeout(r, delayMs));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 // ─── SERVIDOR HTTP ──────────────────────────────────────────────────────
 http.createServer(async (req, res) => {
   try {
@@ -313,7 +331,6 @@ async function salvarSessaoNoRender(){
 }
 
 // ─── AUTENTICAÇÃO GOOGLE ─────────────────────────────────────────────────────
-// Usa JWT com keyFile simulado para compatibilidade com Node.js 18+ / OpenSSL 3
 function getAuth() {
   return new JWT({
     email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -323,7 +340,7 @@ function getAuth() {
   });
 }
 
-async function getDoc(){const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;}
+async function getDoc(){return await comRetry(async()=>{const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;});}
 async function getSheetSaldo(){return(await getDoc()).sheetsByIndex[0];}
 async function getSheetHistorico(){
   const doc=await getDoc();
@@ -398,7 +415,7 @@ async function processarPagamentoProduto(clienteEnviado,quantidade,produto,jid){
     if(novaQtd===0){await row.delete();return{ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};}
     row.set('Quantidade',novaQtd);row.set('Total',(totalAtual-pago).toFixed(2));await row.save();
     return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${(totalAtual-pago).toFixed(2)}`};
-  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
+  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function processarPagamentoValor(clienteEnviado,valorPago,jid){
@@ -421,7 +438,7 @@ async function processarPagamentoValor(clienteEnviado,valorPago,jid){
         r.set('Total',novoTotal.toFixed(2));r.set('Quantidade',Math.max(novaQtd,0));await r.save();restante=0;}
     }
     return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
+  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function gerarRelatorioGeral(){
