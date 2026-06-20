@@ -357,6 +357,25 @@ http.createServer(async(req,res)=>{
   } catch(e){res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');}
 }).listen(PORT,()=>console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
+// ─── CACHE DO JWT (evita criar novo cliente a cada chamada) ───────────────────
+let _jwtCache = null;
+let _jwtCriadoEm = 0;
+const JWT_TTL_MS = 50 * 60 * 1000; // 50 minutos (token expira em 60)
+
+function getAuth() {
+  const agora2 = Date.now();
+  if (_jwtCache && (agora2 - _jwtCriadoEm) < JWT_TTL_MS) {
+    return _jwtCache;
+  }
+  _jwtCache = new JWT({
+    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key: GOOGLE_PRIVATE_KEY,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  _jwtCriadoEm = agora2;
+  return _jwtCache;
+}
+
 // ─── RETRY COM BACKOFF EXPONENCIAL ───────────────────────────────────────────
 async function comRetry(fn, tentativas = 4, espera = 2000) {
   for (let i = 0; i < tentativas; i++) {
@@ -381,25 +400,6 @@ async function comRetry(fn, tentativas = 4, espera = 2000) {
       }
     }
   }
-}
-
-// ─── CACHE DO JWT (evita criar novo cliente a cada chamada) ───────────────────
-let _jwtCache = null;
-let _jwtCriadoEm = 0;
-const JWT_TTL_MS = 50 * 60 * 1000; // 50 minutos (token expira em 60)
-
-function getAuth() {
-  const agora2 = Date.now();
-  if (_jwtCache && (agora2 - _jwtCriadoEm) < JWT_TTL_MS) {
-    return _jwtCache;
-  }
-  _jwtCache = new JWT({
-    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key: GOOGLE_PRIVATE_KEY,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-  });
-  _jwtCriadoEm = agora2;
-  return _jwtCache;
 }
 
 async function getDoc() {
@@ -1250,4 +1250,4 @@ async function conectarBot() {
   });
 }
 
-conectarBot();
+conectarBot().catch(err => console.error('Erro fatal ao iniciar bot:', err.message));
