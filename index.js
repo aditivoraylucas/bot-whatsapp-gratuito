@@ -480,7 +480,8 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
     const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
-    const cliente=nomeCanon||row?row.get('Cliente'):capitalizarNome(clienteEnviado);
+    // FIX: parênteses explícitos para evitar bug de precedência entre || e ternário
+    const cliente = nomeCanon ? nomeCanon : (row ? row.get('Cliente') : capitalizarNome(clienteEnviado));
     if(!row) return {ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
     const qtdPaga   = Math.min(quantidade,qtdAtual);
