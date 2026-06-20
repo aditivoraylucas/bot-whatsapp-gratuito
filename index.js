@@ -34,7 +34,6 @@ async function transcreverAudio(audioBuffer, mimeType) {
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
     form.append('response_format', 'json');
-    // Prompt com exemplos reais de comandos para guiar o Whisper
     const promptWhisper = [
       'Comandos de venda: nomes de clientes seguidos de quantidade e produto.',
       'Produtos: trufa, trufas, bolo, bolos, bombom, bombons.',
@@ -404,7 +403,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
     return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
 }
 
 // ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
@@ -444,7 +443,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       }
     }
     return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.';};}
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -1054,7 +1053,6 @@ async function iniciarBot() {
             agendarTarefas(sock,jid);
           }
 
-          // ─── MENSAGEM DE ÁUDIO ────────────────────────────────────────────
           const audioMsg = msg.message.audioMessage || msg.message.pttMessage;
           if(audioMsg && GROQ_API_KEY){
             try {
@@ -1073,7 +1071,6 @@ async function iniciarBot() {
             continue;
           }
 
-          // ─── MENSAGEM DE TEXTO ────────────────────────────────────────────
           let texto=null;
           if(msg.message.conversation) texto=msg.message.conversation;
           else if(msg.message.extendedTextMessage) texto=msg.message.extendedTextMessage.text;
