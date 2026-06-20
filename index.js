@@ -268,11 +268,38 @@ http.createServer(async(req,res)=>{
 function getAuth() {
   return new JWT({email:GOOGLE_SERVICE_ACCOUNT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']});
 }
-async function getDoc() {
-  const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());
-  await doc.loadInfo();
-  return doc;
+
+// ─── getDoc COM RETRY AUTOMÁTICO ──────────────────────────────────────────────
+// Corrige "Premature close" causado pela hibernação do Render
+async function getDoc(tentativas = 3, espera = 2000) {
+  let ultimoErro;
+  for (let i = 1; i <= tentativas; i++) {
+    try {
+      const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
+      await doc.loadInfo();
+      return doc;
+    } catch (err) {
+      ultimoErro = err;
+      const ehPrematureClose = err.message && (
+        err.message.includes('Premature close') ||
+        err.message.includes('premature close') ||
+        err.message.includes('ECONNRESET') ||
+        err.message.includes('ETIMEDOUT') ||
+        err.message.includes('fetch failed') ||
+        err.message.includes('network')
+      );
+      if (ehPrematureClose && i < tentativas) {
+        console.log(`Planilha: tentativa ${i}/${tentativas} falhou (${err.message}). Aguardando ${espera}ms...`);
+        await new Promise(r => setTimeout(r, espera));
+        espera = espera * 2; // backoff exponencial
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw ultimoErro;
 }
+
 async function getSheetSaldo() { return (await getDoc()).sheetsByIndex[0]; }
 async function getSheetHistorico() {
   const doc=await getDoc();
@@ -1013,86 +1040,3 @@ async function iniciarBot() {
   if(reconectando) return;
   reconectando=true;
   restaurarSessao();
-  try {
-    const{version}=await fetchLatestBaileysVersion();
-    const{state,saveCreds}=await useMultiFileAuthState(AUTH_DIR);
-    const logger=pino({level:'silent'});
-    const sock=makeWASocket({
-      version,
-      auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,logger)},
-      printQRInTerminal:false,logger,
-      browser:Browsers.ubuntu('Chrome'),
-      connectTimeoutMs:60000,defaultQueryTimeoutMs:60000,
-      keepAliveIntervalMs:15000,retryRequestDelayMs:3000,maxMsgRetryCount:3
-    });
-    sockGlobal=sock;
-
-    sock.ev.on('creds.update',async()=>{await saveCreds();await salvarSessaoNoRender();});
-
-    sock.ev.on('connection.update',({connection,lastDisconnect,qr})=>{
-      if(qr){qrCodeData=qr;console.log('QR Code gerado');}
-      if(connection==='close'){
-        botConectado=false;reconectando=false;
-        const code=(lastDisconnect?.error instanceof Boom)?lastDisconnect.error.output?.statusCode:null;
-        console.log(`Conexao fechada. Codigo: ${code}`);
-        if(code===DisconnectReason.loggedOut){try{fs.rmSync(AUTH_DIR,{recursive:true,force:true});}catch(e){}}
-        setTimeout(iniciarBot,5000);
-      } else if(connection==='open'){
-        botConectado=true;qrCodeData=null;reconectando=false;
-        console.log('\u2705 Bot conectado!');
-        salvarSessaoNoRender();
-        if(jidGrupoGlobal) agendarTarefas(sock,jidGrupoGlobal);
-      }
-    });
-
-    sock.ev.on('messages.upsert',async({messages})=>{
-      for(const msg of messages){
-        try{
-          if(!msg.message||msg.key.fromMe) continue;
-          if(!msg.key.remoteJid?.endsWith('@g.us')) continue;
-          const meta=await sock.groupMetadata(msg.key.remoteJid).catch(()=>null);
-          if(!meta||!meta.subject.toLowerCase().includes(GRUPO_NOME.toLowerCase())) continue;
-          const jid=msg.key.remoteJid;
-
-          if(!jidGrupoGlobal){
-            jidGrupoGlobal=jid;
-            agendarTarefas(sock,jid);
-          }
-
-          const audioMsg = msg.message.audioMessage || msg.message.pttMessage;
-          if(audioMsg && GROQ_API_KEY){
-            try {
-              console.log('Áudio recebido, transcrevendo...');
-              const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-              const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
-              const textoTranscrito = await transcreverAudio(buffer, mimeType);
-              if(textoTranscrito){
-                console.log('Transcrição:', textoTranscrito);
-                const resposta = await processarTexto(textoTranscrito, jid, sock);
-                if(resposta){
-                  await sock.sendMessage(jid, { text: `\ud83c\udfa4 _"${textoTranscrito}"_\n\n${resposta}` });
-                }
-              }
-            } catch(e){ console.error('Erro ao processar áudio:', e.message); }
-            continue;
-          }
-
-          let texto=null;
-          if(msg.message.conversation) texto=msg.message.conversation;
-          else if(msg.message.extendedTextMessage) texto=msg.message.extendedTextMessage.text;
-          if(!texto) continue;
-
-          const resposta = await processarTexto(texto, jid, sock);
-          if(resposta) await sock.sendMessage(jid, {text: resposta});
-
-        } catch(err){console.error('Erro ao processar mensagem:',err.message);}
-      }
-    });
-  } catch(err){
-    console.error('Erro ao iniciar bot:',err.message);
-    reconectando=false;
-    setTimeout(iniciarBot,10000);
-  }
-}
-
-iniciarBot();
