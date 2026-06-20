@@ -308,6 +308,29 @@ async function salvarSessaoNoRender() {
   } catch(e){console.error('Erro ao salvar sessao:',e.message);}
 }
 
+// ─── LIMPAR CREDS_JSON NO RENDER (chamado quando sessao expira / loggedOut) ───
+async function limparCREDSnoRender() {
+  try {
+    if(!RENDER_API_KEY||!RENDER_SERVICE_ID) return;
+    const fetch=(await import('node-fetch')).default;
+    const resGet=await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`,{
+      headers:{'Authorization':`Bearer ${RENDER_API_KEY}`,'Content-Type':'application/json'}
+    });
+    const envVars=await resGet.json();
+    const existente=Array.isArray(envVars)?envVars:(envVars.envVars||[]);
+    // Remove CREDS_JSON para forçar novo QR Code no próximo deploy
+    const novas=existente
+      .filter(v=>v.key!=='CREDS_JSON')
+      .map(v=>({key:v.key,value:v.value}));
+    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`,{
+      method:'PUT',
+      headers:{'Authorization':`Bearer ${RENDER_API_KEY}`,'Content-Type':'application/json'},
+      body:JSON.stringify(novas)
+    });
+    console.log('CREDS_JSON removido do Render — proximo inicio vai pedir novo QR Code.');
+  } catch(e){console.error('Erro ao limpar CREDS no Render:',e.message);}
+}
+
 http.createServer(async(req,res)=>{
   try {
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
@@ -480,7 +503,6 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
     const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
-    // FIX: usa variável 'cliente' canônica em todas as mensagens de retorno
     const cliente = nomeCanon ? nomeCanon : (row ? row.get('Cliente') : capitalizarNome(clienteEnviado));
     if(!row) return {ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
@@ -491,7 +513,6 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto,quantidade:qtdPaga,valor:pago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
     if(novaQtd===0){
-      // FIX: salva o nome antes de deletar a row para evitar acesso inválido após delete()
       await row.delete();
       return {ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
     }
@@ -888,7 +909,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1158,8 +1179,11 @@ async function conectarBot() {
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       console.log(`Conexao encerrada. Codigo: ${statusCode}. LoggedOut: ${loggedOut}`);
       if (loggedOut) {
-        console.log('Sessao expirada. Removendo credenciais...');
+        console.log('Sessao expirada. Removendo credenciais locais e limpando Render...');
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
+        // ✅ CORREÇÃO: remove o CREDS_JSON desatualizado do Render
+        // para que o próximo deploy solicite um novo QR Code
+        await limparCREDSnoRender();
       }
       if (!reconectando) {
         reconectando = true;
