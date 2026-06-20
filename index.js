@@ -40,13 +40,13 @@ function delayReconexao() {
 }
 
 // ─── RETRY PARA GOOGLE SHEETS ────────────────────────────────────────────
-async function comRetry(fn, tentativas = 3, delayMs = 2000) {
+async function comRetry(fn, tentativas = 4, delayMs = 3000) {
   for (let i = 0; i < tentativas; i++) {
     try {
       return await fn();
     } catch (err) {
       const msg = err?.message || '';
-      const reintentavel = msg.includes('Premature close') || msg.includes('ECONNRESET') || msg.includes('socket hang up') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed');
+      const reintentavel = msg.includes('Premature close') || msg.includes('ECONNRESET') || msg.includes('socket hang up') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed') || msg.includes('ENOTFOUND') || msg.includes('network');
       if (reintentavel && i < tentativas - 1) {
         console.log(`Google Sheets: erro de rede (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${delayMs}ms...`);
         await new Promise(r => setTimeout(r, delayMs));
@@ -344,35 +344,37 @@ async function getDoc(){return await comRetry(async()=>{const doc=new GoogleSpre
 async function getSheetSaldo(){return(await getDoc()).sheetsByIndex[0];}
 async function getSheetHistorico(){
   const doc=await getDoc();
-  if(doc.sheetCount<2)return await doc.addSheet({title:'Historico',headerValues:['Data','Cliente','Tipo','Produto','Quantidade','Valor']});
+  if(doc.sheetCount<2)return await comRetry(()=>doc.addSheet({title:'Historico',headerValues:['Data','Cliente','Tipo','Produto','Quantidade','Valor']}));
   const sheet=doc.sheetsByIndex[1];
-  try{await sheet.loadHeaderRow();}catch(e){await sheet.setHeaderRow(['Data','Cliente','Tipo','Produto','Quantidade','Valor']);}
+  try{await comRetry(()=>sheet.loadHeaderRow());}catch(e){await comRetry(()=>sheet.setHeaderRow(['Data','Cliente','Tipo','Produto','Quantidade','Valor']));}
   return sheet;
 }
 
 async function registrarOuAcumular(clienteEnviado,produto,quantidade){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    const precoAtual=PRECOS[produto]||0,valorNovo=precoAtual*quantidade;
-    const existente=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
-    const cliente=existente?existente.get('Cliente'):capitalizarNome(clienteEnviado);
-    if(LIMITE_CREDITO_PADRAO>0){
-      const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
-      const totalAtual=rowsC.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-      if(totalAtual+valorNovo>LIMITE_CREDITO_PADRAO)return{cliente,limiteBloqueado:true,totalAtual,valorNovo};
-    }
-    if(existente){
-      const qtdAcumulada=parseInt(existente.get('Quantidade')||'0')+quantidade;
-      const totalAcumulado=parseFloat(existente.get('Total')||'0')+valorNovo;
-      existente.set('Quantidade',qtdAcumulada);existente.set('Total',totalAcumulado.toFixed(2));existente.set('UltimaCompra',agora());
-      await existente.save();
-      await(await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
-      return{cliente,totalAcumulado,qtdAcumulada};
-    }else{
-      await sheet.addRow({Cliente:cliente,Produto:produto,Quantidade:quantidade,Total:valorNovo.toFixed(2),UltimaCompra:agora()});
-      await(await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
-      return{cliente,totalAcumulado:valorNovo,qtdAcumulada:quantidade};
-    }
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      const precoAtual=PRECOS[produto]||0,valorNovo=precoAtual*quantidade;
+      const existente=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
+      const cliente=existente?existente.get('Cliente'):capitalizarNome(clienteEnviado);
+      if(LIMITE_CREDITO_PADRAO>0){
+        const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
+        const totalAtual=rowsC.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+        if(totalAtual+valorNovo>LIMITE_CREDITO_PADRAO)return{cliente,limiteBloqueado:true,totalAtual,valorNovo};
+      }
+      if(existente){
+        const qtdAcumulada=parseInt(existente.get('Quantidade')||'0')+quantidade;
+        const totalAcumulado=parseFloat(existente.get('Total')||'0')+valorNovo;
+        existente.set('Quantidade',qtdAcumulada);existente.set('Total',totalAcumulado.toFixed(2));existente.set('UltimaCompra',agora());
+        await existente.save();
+        await(await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
+        return{cliente,totalAcumulado,qtdAcumulada};
+      }else{
+        await sheet.addRow({Cliente:cliente,Produto:produto,Quantidade:quantidade,Total:valorNovo.toFixed(2),UltimaCompra:agora()});
+        await(await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
+        return{cliente,totalAcumulado:valorNovo,qtdAcumulada:quantidade};
+      }
+    });
   }catch(err){console.error('Erro planilha:',err.message);return null;}
 }
 
@@ -383,99 +385,109 @@ async function cancelarLancamento(jid,nomeDigitado){
     for(let i=hist.length-1;i>=0;i--){if(mesmoNome(hist[i].cliente,nomeDigitado)){idx=i;break;}}
     if(idx<0)return `❌ Nenhum lançamento recente encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const lanc=hist[idx];hist.splice(idx,1);
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    const sheetH=await getSheetHistorico(),rowsH=await sheetH.getRows();
-    if(lanc.tipo==='compra'){
-      const row=rows.find(r=>r.get('Cliente')===lanc.cliente&&norm(r.get('Produto'))===norm(lanc.produto));
-      if(row){const nq=parseInt(row.get('Quantidade')||'0')-lanc.quantidade,nt=parseFloat(row.get('Total')||'0')-lanc.valor;
-        if(nq<=0||nt<=0)await row.delete();else{row.set('Quantidade',nq);row.set('Total',nt.toFixed(2));await row.save();}}
-      for(let i=rowsH.length-1;i>=0;i--)if(rowsH[i].get('Cliente')===lanc.cliente&&norm(rowsH[i].get('Produto'))===norm(lanc.produto)&&rowsH[i].get('Tipo')==='Compra'){await rowsH[i].delete();break;}
-      return `↗️ Lançamento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${nomeProdutoExib(lanc.produto)} (R$ ${lanc.valor.toFixed(2)})`;
-    }
-    if(lanc.tipo==='pagamento'){
-      const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),lanc.cliente));
-      if(rowsC.length){let restante=lanc.valor;for(const r of rowsC){if(restante<=0)break;r.set('Total',(parseFloat(r.get('Total')||'0')+restante).toFixed(2));await r.save();restante=0;}}
-      else{const produto=lanc.produto&&lanc.produto!=='geral'?lanc.produto:'trufa';await sheet.addRow({Cliente:lanc.cliente,Produto:produto,Quantidade:0,Total:lanc.valor.toFixed(2),UltimaCompra:agora()});}
-      for(let i=rowsH.length-1;i>=0;i--)if(rowsH[i].get('Cliente')===lanc.cliente&&rowsH[i].get('Tipo')==='Pagamento'){await rowsH[i].delete();break;}
-      return `↗️ Pagamento cancelado: *${lanc.cliente}* - R$ ${lanc.valor.toFixed(2)} devolvido ao saldo.`;
-    }
-    return '❌ Não foi possível cancelar.';
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      const sheetH=await getSheetHistorico(),rowsH=await sheetH.getRows();
+      if(lanc.tipo==='compra'){
+        const row=rows.find(r=>r.get('Cliente')===lanc.cliente&&norm(r.get('Produto'))===norm(lanc.produto));
+        if(row){const nq=parseInt(row.get('Quantidade')||'0')-lanc.quantidade,nt=parseFloat(row.get('Total')||'0')-lanc.valor;
+          if(nq<=0||nt<=0)await row.delete();else{row.set('Quantidade',nq);row.set('Total',nt.toFixed(2));await row.save();}}
+        for(let i=rowsH.length-1;i>=0;i--)if(rowsH[i].get('Cliente')===lanc.cliente&&norm(rowsH[i].get('Produto'))===norm(lanc.produto)&&rowsH[i].get('Tipo')==='Compra'){await rowsH[i].delete();break;}
+        return `↗️ Lançamento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${nomeProdutoExib(lanc.produto)} (R$ ${lanc.valor.toFixed(2)})`;
+      }
+      if(lanc.tipo==='pagamento'){
+        const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),lanc.cliente));
+        if(rowsC.length){let restante=lanc.valor;for(const r of rowsC){if(restante<=0)break;r.set('Total',(parseFloat(r.get('Total')||'0')+restante).toFixed(2));await r.save();restante=0;}}
+        else{const produto=lanc.produto&&lanc.produto!=='geral'?lanc.produto:'trufa';await sheet.addRow({Cliente:lanc.cliente,Produto:produto,Quantidade:0,Total:lanc.valor.toFixed(2),UltimaCompra:agora()});}
+        for(let i=rowsH.length-1;i>=0;i--)if(rowsH[i].get('Cliente')===lanc.cliente&&rowsH[i].get('Tipo')==='Pagamento'){await rowsH[i].delete();break;}
+        return `↗️ Pagamento cancelado: *${lanc.cliente}* - R$ ${lanc.valor.toFixed(2)} devolvido ao saldo.`;
+      }
+      return '❌ Não foi possível cancelar.';
+    });
   }catch(err){console.error('Erro cancelar:',err.message);return '❌ Erro ao cancelar lançamento.';}
 }
 
 async function processarPagamentoProduto(clienteEnviado,quantidade,produto,jid){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
-    if(!row)return{ok:false,msg:`❌ Nenhuma dívida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
-    const qtdAtual=parseInt(row.get('Quantidade')||'0'),qtdPaga=Math.min(quantidade,qtdAtual),novaQtd=qtdAtual-qtdPaga;
-    const totalAtual=parseFloat(row.get('Total')||'0'),pago=qtdAtual>0?(totalAtual/qtdAtual)*qtdPaga:0;
-    if(jid)pushLancamento(jid,{tipo:'pagamento',cliente:row.get('Cliente'),produto,quantidade:qtdPaga,valor:pago});
-    await(await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
-    if(novaQtd===0){await row.delete();return{ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};}
-    row.set('Quantidade',novaQtd);row.set('Total',(totalAtual-pago).toFixed(2));await row.save();
-    return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${(totalAtual-pago).toFixed(2)}`};
-  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
+      if(!row)return{ok:false,msg:`❌ Nenhuma dívida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
+      const qtdAtual=parseInt(row.get('Quantidade')||'0'),qtdPaga=Math.min(quantidade,qtdAtual),novaQtd=qtdAtual-qtdPaga;
+      const totalAtual=parseFloat(row.get('Total')||'0'),pago=qtdAtual>0?(totalAtual/qtdAtual)*qtdPaga:0;
+      if(jid)pushLancamento(jid,{tipo:'pagamento',cliente:row.get('Cliente'),produto,quantidade:qtdPaga,valor:pago});
+      await(await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
+      if(novaQtd===0){await row.delete();return{ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};}
+      row.set('Quantidade',novaQtd);row.set('Total',(totalAtual-pago).toFixed(2));await row.save();
+      return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${(totalAtual-pago).toFixed(2)}`};
+    });
+  }catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
 }
 
 async function processarPagamentoValor(clienteEnviado,valorPago,jid){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    const nomeCanon=resolverNome(clienteEnviado,[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))]);
-    const rowsCliente=nomeCanon?rows.filter(r=>r.get('Cliente')===nomeCanon):rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
-    if(!rowsCliente.length)return{ok:false,msg:`❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
-    const cliente=rowsCliente[0].get('Cliente');
-    const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    if(jid)pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
-    await(await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
-    if(valorPago>=totalDevido){for(const r of rowsCliente)await r.delete();return{ok:true,msg:`✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.`};}
-    let restante=valorPago;
-    for(const r of rowsCliente){
-      if(restante<=0)break;
-      const totalRow=parseFloat(r.get('Total')||'0');
-      if(restante>=totalRow){restante-=totalRow;await r.delete();}
-      else{const novoTotal=totalRow-restante,qtdAtual=parseInt(r.get('Quantidade')||'0'),novaQtd=totalRow>0?Math.round(qtdAtual*(novoTotal/totalRow)):0;
-        r.set('Total',novoTotal.toFixed(2));r.set('Quantidade',Math.max(novaQtd,0));await r.save();restante=0;}
-    }
-    return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      const nomeCanon=resolverNome(clienteEnviado,[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))]);
+      const rowsCliente=nomeCanon?rows.filter(r=>r.get('Cliente')===nomeCanon):rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
+      if(!rowsCliente.length)return{ok:false,msg:`❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
+      const cliente=rowsCliente[0].get('Cliente');
+      const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+      if(jid)pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
+      await(await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
+      if(valorPago>=totalDevido){for(const r of rowsCliente)await r.delete();return{ok:true,msg:`✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.`};}
+      let restante=valorPago;
+      for(const r of rowsCliente){
+        if(restante<=0)break;
+        const totalRow=parseFloat(r.get('Total')||'0');
+        if(restante>=totalRow){restante-=totalRow;await r.delete();}
+        else{const novoTotal=totalRow-restante,qtdAtual=parseInt(r.get('Quantidade')||'0'),novaQtd=totalRow>0?Math.round(qtdAtual*(novoTotal/totalRow)):0;
+          r.set('Total',novoTotal.toFixed(2));r.set('Quantidade',Math.max(novaQtd,0));await r.save();restante=0;}
+      }
+      return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
+    });
+  }catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
 }
 
 async function gerarRelatorioGeral(){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    if(!rows.length)return 'Nenhuma dívida em aberto no momento.';
-    const clientes={};
-    for(const row of rows){
-      const nome=(row.get('Cliente')||'').trim(),produto=norm(row.get('Produto')||'');
-      const quantidade=parseInt(row.get('Quantidade')||'0'),total=parseFloat(row.get('Total')||'0');
-      if(!nome||!produto)continue;
-      if(!clientes[nome])clientes[nome]={itens:[],totalDevido:0};
-      clientes[nome].itens.push({produto,quantidade,total});clientes[nome].totalDevido+=total;
-    }
-    if(!Object.keys(clientes).length)return 'Nenhuma dívida em aberto no momento.';
-    const ordenados=Object.entries(clientes).sort((a,b)=>b[1].totalDevido-a[1].totalDevido);
-    let resp='*Relatório de Dívidas*\n───────────────\n',totalGeral=0;
-    for(const[nome,dados]of ordenados){resp+=`\n*${nome}*\n`;for(const item of dados.itens)resp+=`  ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;resp+=`  *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;totalGeral+=dados.totalDevido;}
-    return resp+`\n───────────────\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      if(!rows.length)return 'Nenhuma dívida em aberto no momento.';
+      const clientes={};
+      for(const row of rows){
+        const nome=(row.get('Cliente')||'').trim(),produto=norm(row.get('Produto')||'');
+        const quantidade=parseInt(row.get('Quantidade')||'0'),total=parseFloat(row.get('Total')||'0');
+        if(!nome||!produto)continue;
+        if(!clientes[nome])clientes[nome]={itens:[],totalDevido:0};
+        clientes[nome].itens.push({produto,quantidade,total});clientes[nome].totalDevido+=total;
+      }
+      if(!Object.keys(clientes).length)return 'Nenhuma dívida em aberto no momento.';
+      const ordenados=Object.entries(clientes).sort((a,b)=>b[1].totalDevido-a[1].totalDevido);
+      let resp='*Relatório de Dívidas*\n───────────────\n',totalGeral=0;
+      for(const[nome,dados]of ordenados){resp+=`\n*${nome}*\n`;for(const item of dados.itens)resp+=`  ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;resp+=`  *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;totalGeral+=dados.totalDevido;}
+      return resp+`\n───────────────\n*TOTAL A RECEBER: R$ ${totalGeral.toFixed(2)}*`;
+    });
   }catch(err){console.error('Erro relatorio:',err.message);return '❌ Erro ao gerar relatório.';}
 }
 
 async function carregarHistoricoAgrupado(filtroMes){
-  const doc=await getDoc(),rowsSaldo=await doc.sheetsByIndex[0].getRows(),saldos={};
-  for(const row of rowsSaldo){const nome=(row.get('Cliente')||'').trim(),total=parseFloat(row.get('Total')||'0');if(!nome)continue;if(!saldos[nome])saldos[nome]=0;saldos[nome]+=total;}
-  if(doc.sheetCount<2)return{historico:{},saldos};
-  const sheetHist=doc.sheetsByIndex[1];
-  try{await sheetHist.loadHeaderRow();}catch(e){return{historico:{},saldos};}
-  const rowsHist=await sheetHist.getRows(),nomesCanonicos=[...Object.keys(saldos)],historico={};
-  for(const row of rowsHist){
-    const nomeRaw=(row.get('Cliente')||'').trim();if(!nomeRaw)continue;
-    if(filtroMes){const data=(row.get('Data')||'').trim();if(!data)continue;const partes=data.split(' ')[0].split('/');if(partes.length>=2){const mesNum=parseInt(partes[1]),nomesArr=['','janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'],filtroNorm=norm(filtroMes),filtroNumero=parseInt(filtroNorm),bateu=isNaN(filtroNumero)?norm(nomesArr[mesNum])===filtroNorm:mesNum===filtroNumero;if(!bateu)continue;}}
-    let nomeCanon=resolverNome(nomeRaw,nomesCanonicos);if(!nomeCanon){nomesCanonicos.push(nomeRaw);nomeCanon=nomeRaw;}
-    if(!historico[nomeCanon])historico[nomeCanon]=[];
-    historico[nomeCanon].push({data:(row.get('Data')||'').trim(),tipo:(row.get('Tipo')||'').trim(),produto:norm(row.get('Produto')||''),qtd:(row.get('Quantidade')||'').trim(),valor:parseFloat(row.get('Valor')||'0')});
-  }
-  return{historico,saldos};
+  return await comRetry(async()=>{
+    const doc=await getDoc(),rowsSaldo=await doc.sheetsByIndex[0].getRows(),saldos={};
+    for(const row of rowsSaldo){const nome=(row.get('Cliente')||'').trim(),total=parseFloat(row.get('Total')||'0');if(!nome)continue;if(!saldos[nome])saldos[nome]=0;saldos[nome]+=total;}
+    if(doc.sheetCount<2)return{historico:{},saldos};
+    const sheetHist=doc.sheetsByIndex[1];
+    try{await sheetHist.loadHeaderRow();}catch(e){return{historico:{},saldos};}
+    const rowsHist=await sheetHist.getRows(),nomesCanonicos=[...Object.keys(saldos)],historico={};
+    for(const row of rowsHist){
+      const nomeRaw=(row.get('Cliente')||'').trim();if(!nomeRaw)continue;
+      if(filtroMes){const data=(row.get('Data')||'').trim();if(!data)continue;const partes=data.split(' ')[0].split('/');if(partes.length>=2){const mesNum=parseInt(partes[1]),nomesArr=['','janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'],filtroNorm=norm(filtroMes),filtroNumero=parseInt(filtroNorm),bateu=isNaN(filtroNumero)?norm(nomesArr[mesNum])===filtroNorm:mesNum===filtroNumero;if(!bateu)continue;}}
+      let nomeCanon=resolverNome(nomeRaw,nomesCanonicos);if(!nomeCanon){nomesCanonicos.push(nomeRaw);nomeCanon=nomeRaw;}
+      if(!historico[nomeCanon])historico[nomeCanon]=[];
+      historico[nomeCanon].push({data:(row.get('Data')||'').trim(),tipo:(row.get('Tipo')||'').trim(),produto:norm(row.get('Produto')||''),qtd:(row.get('Quantidade')||'').trim(),valor:parseFloat(row.get('Valor')||'0')});
+    }
+    return{historico,saldos};
+  });
 }
 
 async function gerarRelatorioDetalhado(){
@@ -506,15 +518,17 @@ async function gerarRelatorioQuitados(){
 
 async function gerarSaldoIndividual(nomeDigitado){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
-    const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
-    if(!nomeCanon){const{historico,saldos}=await carregarHistoricoAgrupado();const nomeHist=resolverNome(nomeDigitado,Object.keys(historico));if(nomeHist&&!(saldos[nomeHist]>0))return `✅ *${nomeHist}* não tem dívidas em aberto. Conta quitada!`;return `❌ Nenhuma movimentação encontrada para *${capitalizarNome(nomeDigitado)}*.`;}
-    const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
-    if(!rowsCliente.length)return `✅ *${nomeCanon}* não tem dívidas em aberto.`;
-    let totalDevido=0,resp=`*${nomeCanon}*\n───────────────\n`;
-    for(const row of rowsCliente){const produto=norm(row.get('Produto')||''),qtd=parseInt(row.get('Quantidade')||'0'),total=parseFloat(row.get('Total')||'0');resp+=`${nomeProdutoExib(produto)}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;totalDevido+=total;}
-    return resp+`───────────────\n*Total devido: R$ ${totalDevido.toFixed(2)}*`;
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
+      const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
+      if(!nomeCanon){const{historico,saldos}=await carregarHistoricoAgrupado();const nomeHist=resolverNome(nomeDigitado,Object.keys(historico));if(nomeHist&&!(saldos[nomeHist]>0))return `✅ *${nomeHist}* não tem dívidas em aberto. Conta quitada!`;return `❌ Nenhuma movimentação encontrada para *${capitalizarNome(nomeDigitado)}*.`;}
+      const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
+      if(!rowsCliente.length)return `✅ *${nomeCanon}* não tem dívidas em aberto.`;
+      let totalDevido=0,resp=`*${nomeCanon}*\n───────────────\n`;
+      for(const row of rowsCliente){const produto=norm(row.get('Produto')||''),qtd=parseInt(row.get('Quantidade')||'0'),total=parseFloat(row.get('Total')||'0');resp+=`${nomeProdutoExib(produto)}: ${qtd} unid. = R$ ${total.toFixed(2)}\n`;totalDevido+=total;}
+      return resp+`───────────────\n*Total devido: R$ ${totalDevido.toFixed(2)}*`;
+    });
   }catch(err){console.error('Erro saldo:',err.message);return '❌ Erro ao consultar saldo.';}
 }
 
@@ -546,11 +560,13 @@ async function gerarRelatorioMes(mes){
 
 async function gerarResumoDiario(){
   try{
-    const hoje=agoraData(),{historico}=await carregarHistoricoAgrupado();
-    let totalVendas=0,totalPago=0,qtdTrufa=0,qtdBolo=0,clientes=new Set();
-    for(const[nome,movs]of Object.entries(historico)){for(const m of movs){if(soData(m.data)!==hoje)continue;if(m.tipo==='Compra'){totalVendas+=m.valor;if(m.produto==='trufa')qtdTrufa+=parseInt(m.qtd||'0');if(m.produto==='bolo')qtdBolo+=parseInt(m.qtd||'0');clientes.add(nome);}else if(m.tipo==='Pagamento')totalPago+=m.valor;}}
-    const rows=await(await getSheetSaldo()).getRows(),totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    return `*Resumo do Dia - ${hoje}*\n───────────────\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n───────────────\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
+    return await comRetry(async()=>{
+      const hoje=agoraData(),{historico}=await carregarHistoricoAgrupado();
+      let totalVendas=0,totalPago=0,qtdTrufa=0,qtdBolo=0,clientes=new Set();
+      for(const[nome,movs]of Object.entries(historico)){for(const m of movs){if(soData(m.data)!==hoje)continue;if(m.tipo==='Compra'){totalVendas+=m.valor;if(m.produto==='trufa')qtdTrufa+=parseInt(m.qtd||'0');if(m.produto==='bolo')qtdBolo+=parseInt(m.qtd||'0');clientes.add(nome);}else if(m.tipo==='Pagamento')totalPago+=m.valor;}}
+      const rows=await(await getSheetSaldo()).getRows(),totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+      return `*Resumo do Dia - ${hoje}*\n───────────────\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n───────────────\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
+    });
   }catch(err){console.error('Erro resumo:',err.message);return '❌ Erro ao gerar resumo.';}
 }
 
@@ -560,16 +576,18 @@ const HORA_RESUMO  =parseInt(process.env.HORA_RESUMO  ||'20');
 
 async function verificarLembretes(sock,jid){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows(),agora2=new Date(),clientes={};
-    for(const row of rows){
-      const nome=(row.get('Cliente')||'').trim(),total=parseFloat(row.get('Total')||'0'),ultima=(row.get('UltimaCompra')||'').trim();
-      if(!nome||total<=0||!ultima)continue;
-      const partes=ultima.split(' ')[0].split('/');
-      if(partes.length<3)continue;
-      const diasPassados=Math.floor((agora2-new Date(`${partes[2]}-${partes[1]}-${partes[0]}`))/(864e5));
-      if(diasPassados>=DIAS_LEMBRETE){if(!clientes[nome])clientes[nome]={total:0,dias:diasPassados};clientes[nome].total+=total;clientes[nome].dias=Math.max(clientes[nome].dias,diasPassados);}
-    }
-    for(const[nome,dados]of Object.entries(clientes))await sock.sendMessage(jid,{text:`⚠️ *Lembrete de cobrança*\n*${nome}* está com R$ ${dados.total.toFixed(2)} em aberto há *${dados.dias} dias*.`});
+    await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows(),agora2=new Date(),clientes={};
+      for(const row of rows){
+        const nome=(row.get('Cliente')||'').trim(),total=parseFloat(row.get('Total')||'0'),ultima=(row.get('UltimaCompra')||'').trim();
+        if(!nome||total<=0||!ultima)continue;
+        const partes=ultima.split(' ')[0].split('/');
+        if(partes.length<3)continue;
+        const diasPassados=Math.floor((agora2-new Date(`${partes[2]}-${partes[1]}-${partes[0]}`))/(864e5));
+        if(diasPassados>=DIAS_LEMBRETE){if(!clientes[nome])clientes[nome]={total:0,dias:diasPassados};clientes[nome].total+=total;clientes[nome].dias=Math.max(clientes[nome].dias,diasPassados);}
+      }
+      for(const[nome,dados]of Object.entries(clientes))await sock.sendMessage(jid,{text:`⚠️ *Lembrete de cobrança*\n*${nome}* está com R$ ${dados.total.toFixed(2)} em aberto há *${dados.dias} dias*.`});
+    });
   }catch(e){console.error('Erro lembrete:',e.message);}
 }
 
@@ -578,15 +596,17 @@ function cadastrarNovoProduto(nomeProduto,preco){const key=norm(nomeProduto).rep
 function listarProdutos(){const todos=todosOsSinonimos();let msg='*Produtos cadastrados*\n───────────────\n';for(const[key]of Object.entries(todos)){const preco=PRECOS[key];if(preco===undefined)continue;msg+=`${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;}return msg+'───────────────\n_Para mudar o preço: preco [produto] [valor]_';}
 async function zerarCliente(nomeDigitado){
   try{
-    const sheet=await getSheetSaldo(),rows=await sheet.getRows();
-    const nomeCanon=resolverNome(nomeDigitado,[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))]);
-    if(!nomeCanon)return `❌ Cliente *${capitalizarNome(nomeDigitado)}* não encontrado.`;
-    const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
-    if(!rowsCliente.length)return `✅ *${nomeCanon}* já está sem dívidas.`;
-    const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    for(const r of rowsCliente)await r.delete();
-    await(await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
-    return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
+    return await comRetry(async()=>{
+      const sheet=await getSheetSaldo(),rows=await sheet.getRows();
+      const nomeCanon=resolverNome(nomeDigitado,[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))]);
+      if(!nomeCanon)return `❌ Cliente *${capitalizarNome(nomeDigitado)}* não encontrado.`;
+      const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
+      if(!rowsCliente.length)return `✅ *${nomeCanon}* já está sem dívidas.`;
+      const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+      for(const r of rowsCliente)await r.delete();
+      await(await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
+      return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
+    });
   }catch(err){console.error('Erro zerar:',err.message);return '❌ Erro ao zerar cliente.';}
 }
 
