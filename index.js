@@ -385,8 +385,8 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
     const nomeCanon=resolverNome(clienteEnviado, nomesConhecidos);
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
-    const cliente=nomeCanon||row?row.get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!row) return{ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
+    const cliente=(nomeCanon || (row ? row.get('Cliente') : capitalizarNome(clienteEnviado)));
+    if(!row) return {ok:false,msg:`\u274c Nenhuma d\u00edvida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
     const qtdPaga   = Math.min(quantidade,qtdAtual);
     const novaQtd   = qtdAtual-qtdPaga;
@@ -396,14 +396,17 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
     if(novaQtd===0){
       await row.delete();
-      return{ok:true,msg:`\u2705 *${row.get('Cliente')}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
+      return {ok:true,msg:`\u2705 *${row.get('Cliente')}* quitou toda a d\u00edvida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`};
     }
     const novoTotal=totalAtual-pago;
     row.set('Quantidade',novaQtd);
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
-    return{ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
+    return {ok:true,msg:`\u2705 *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
+  } catch(err){
+    console.error('Erro pag produto:',err.message);
+    return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};
+  }
 }
 
 // ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
@@ -417,13 +420,13 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       ? rows.filter(r=>r.get('Cliente')===nomeCanon)
       : rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
     const cliente=rowsCliente.length?rowsCliente[0].get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!rowsCliente.length) return{ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
+    if(!rowsCliente.length) return {ok:false,msg:`\u274c Nenhuma d\u00edvida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
     const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
     await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
     if(valorPago>=totalDevido){
       for(const r of rowsCliente) await r.delete();
-      return{ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.`};
+      return {ok:true,msg:`\u2705 *${cliente}* quitou toda a d\u00edvida! Pagou R$ ${valorPago.toFixed(2)}.`};
     }
     let restante=valorPago;
     for(const r of rowsCliente){
@@ -442,8 +445,11 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
         restante=0;
       }
     }
-    return{ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
+    return {ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
+  } catch(err){
+    console.error('Erro pag valor:',err.message);
+    return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};
+  }
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
