@@ -6,7 +6,7 @@ const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const path = require('path');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
-const { GoogleAuth } = require('google-auth-library');
+const { JWT } = require('google-auth-library');
 const http = require('http');
 const qrcode = require('qrcode');
 const pino = require('pino');
@@ -267,24 +267,13 @@ http.createServer(async(req,res)=>{
   } catch(e){res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');}
 }).listen(PORT,()=>console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
-// ─── AUTENTICACAO GOOGLE (nova abordagem via GoogleAuth + credentials objeto) ────────
+// ─── AUTENTICACAO GOOGLE via JWT (compatível com google-spreadsheet v4) ────────
 function getAuth() {
-  return new GoogleAuth({
-    credentials: {
-      client_email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      private_key: GOOGLE_PRIVATE_KEY,
-    },
+  return new JWT({
+    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key: GOOGLE_PRIVATE_KEY,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
-}
-
-// Cache do token autenticado para evitar re-autenticar a cada chamada
-let _authClient = null;
-async function getAuthClient() {
-  if (_authClient) return _authClient;
-  const auth = getAuth();
-  _authClient = await auth.getClient();
-  return _authClient;
 }
 
 // ─── HELPER: detecta erro de rede transitório ─────────────────────────────────
@@ -308,10 +297,7 @@ async function getDoc(tentativas = 4, espera = 3000) {
   let ultimoErro;
   for (let i = 1; i <= tentativas; i++) {
     try {
-      // Invalida cache do cliente de auth em caso de retry (força novo token)
-      if (i > 1) _authClient = null;
-      const authClient = await getAuthClient();
-      const doc = new GoogleSpreadsheet(SPREADSHEET_ID, authClient);
+      const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
       await doc.loadInfo();
       return doc;
     } catch (err) {
@@ -319,7 +305,7 @@ async function getDoc(tentativas = 4, espera = 3000) {
       if (ehErroDeRede(err) && i < tentativas) {
         console.log(`[Planilha] Tentativa ${i}/${tentativas} falhou (${err.message.split('\n')[0]}). Aguardando ${espera}ms...`);
         await new Promise(r => setTimeout(r, espera));
-        espera = Math.min(espera * 2, 15000);
+        espera = Math.min(espera * 2, 15000); // backoff exponencial, máx 15s
       } else {
         throw err;
       }
@@ -730,4 +716,420 @@ async function gerarRelatorioMes(mes) {
 }
 
 // ─── RESUMO DIARIO ────────────────────────────────────────────────────────────
-async function gera
+async function gerarResumoDiario() {
+  try {
+    const hoje=agoraData();
+    const{historico}=await carregarHistoricoAgrupado();
+    let totalVendas=0,totalPago=0,qtdTrufa=0,qtdBolo=0,clientes=new Set();
+    for(const [nome,movs] of Object.entries(historico)){
+      for(const m of movs){
+        const dataMovStr=soData(m.data);
+        if(dataMovStr!==hoje) continue;
+        if(m.tipo==='Compra'){
+          totalVendas+=m.valor;
+          if(m.produto==='trufa') qtdTrufa+=parseInt(m.qtd||'0');
+          if(m.produto==='bolo')  qtdBolo +=parseInt(m.qtd||'0');
+          clientes.add(nome);
+        } else if(m.tipo==='Pagamento'){
+          totalPago+=m.valor;
+        }
+      }
+    }
+    const sheetSaldo=await getSheetSaldo();
+    const rows=await sheetSaldo.getRows();
+    const totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+    return `*Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
+  } catch(err){console.error('Erro resumo:',err.message);return '\u274c Erro ao gerar resumo.';}
+}
+
+// ─── LEMBRETE DE COBRANCA ─────────────────────────────────────────────────────
+const DIAS_LEMBRETE = parseInt(process.env.DIAS_LEMBRETE||'7');
+const HORA_LEMBRETE = parseInt(process.env.HORA_LEMBRETE||'20');
+const HORA_RESUMO   = parseInt(process.env.HORA_RESUMO  ||'20');
+
+async function verificarLembretes(sock, jid) {
+  try {
+    const sheet=await getSheetSaldo();
+    const rows=await sheet.getRows();
+    const agora2=new Date();
+    const clientes={};
+    for(const row of rows){
+      const nome=(row.get('Cliente')||'').trim();
+      const total=parseFloat(row.get('Total')||'0');
+      const ultima=(row.get('UltimaCompra')||'').trim();
+      if(!nome||total<=0||!ultima) continue;
+      const partes=ultima.split(' ')[0].split('/');
+      if(partes.length<3) continue;
+      const dataUltima=new Date(`${partes[2]}-${partes[1]}-${partes[0]}`);
+      const diasPassados=Math.floor((agora2-dataUltima)/(1000*60*60*24));
+      if(diasPassados>=DIAS_LEMBRETE){
+        if(!clientes[nome]) clientes[nome]={total:0,dias:diasPassados};
+        clientes[nome].total+=total;
+        clientes[nome].dias=Math.max(clientes[nome].dias,diasPassados);
+      }
+    }
+    const nomes=Object.keys(clientes);
+    if(!nomes.length) return;
+    for(const [nome,dados] of Object.entries(clientes)){
+      const msg=`\u26a0\ufe0f *Lembrete de cobran\u00e7a*\n*${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
+      await sock.sendMessage(jid,{text:msg});
+    }
+  } catch(e){console.error('Erro lembrete:',e.message);}
+}
+
+// ─── MUDAR PRECO ──────────────────────────────────────────────────────────────
+function mudarPreco(produto, novoPreco) {
+  const p=toProduto(produto);
+  if(!p) return `\u274c Produto *${produto}* n\u00e3o encontrado.`;
+  const precoAntigo=PRECOS[p]||0;
+  PRECOS[p]=novoPreco;
+  salvarPrecos();
+  return `\u2705 Pre\u00e7o de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} \u2192 R$ ${novoPreco.toFixed(2)}\n_Saldos existentes n\u00e3o foram alterados. Vale para novas compras._`;
+}
+
+// ─── NOVO PRODUTO ─────────────────────────────────────────────────────────────
+function cadastrarNovoProduto(nomeProduto, preco) {
+  const key=norm(nomeProduto).replace(/\s+/g,'_');
+  if(PRECOS[key]!==undefined) return `\u26a0\ufe0f Produto *${nomeProduto}* j\u00e1 existe. Para mudar o pre\u00e7o: _preco ${nomeProduto} R$XX_`;
+  PRECOS[key]=preco;
+  SINONIMOS_EXTRA[key]=[norm(nomeProduto), nomeProduto.toLowerCase().trim()];
+  SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];
+  salvarPrecos();
+  salvarSinonimosExtra();
+  return `\u2705 Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;
+}
+
+// ─── LISTAR PRODUTOS ──────────────────────────────────────────────────────────
+function listarProdutos() {
+  const todos=todosOsSinonimos();
+  let msg='*Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
+  for(const [key] of Object.entries(todos)){
+    const preco=PRECOS[key];
+    if(preco===undefined) continue;
+    msg+=`${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;
+  }
+  msg+='\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_Para mudar o pre\u00e7o: preco [produto] [valor]_';
+  return msg;
+}
+
+// ─── ZERAR CLIENTE ────────────────────────────────────────────────────────────
+async function zerarCliente(nomeDigitado) {
+  try {
+    const sheet=await getSheetSaldo();
+    const rows=await sheet.getRows();
+    const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
+    const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
+    if(!nomeCanon) return `\u274c Cliente *${capitalizarNome(nomeDigitado)}* n\u00e3o encontrado.`;
+    const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
+    if(!rowsCliente.length) return `\u2705 *${nomeCanon}* j\u00e1 est\u00e1 sem d\u00edvidas.`;
+    const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
+    for(const r of rowsCliente) await r.delete();
+    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
+    return `\u2705 D\u00edvida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
+  } catch(err){console.error('Erro zerar:',err.message);return '\u274c Erro ao zerar cliente.';}
+}
+
+// ─── PARSER DE LINHA (COMPRAS) ────────────────────────────────────────────────
+const PALAVRAS_RESERVADAS = new Set([
+  'pagou','pix','transferiu','depositou','mandou','enviou',
+  'cancelar','saldo','historico','relatorio','resumo',
+  'cobrar','lembrete','lembretes','preco','produtos','zerar','novo'
+]);
+
+function parsearLinha(linha) {
+  const limpa=linha.replace(/,/g,' ').replace(/\b(mais|e|de)\b/gi,' ').replace(/\+/g,' ').replace(/\s+/g,' ').trim();
+  const palavrasOrig=limpa.split(' ').filter(Boolean);
+  const palavrasNorm=palavrasOrig.map(norm);
+  const n=palavrasNorm.length;
+  let inicioItens=-1;
+  for(let i=0;i<n;i++){
+    const p1=toProduto(palavrasNorm[i]);
+    if(p1){inicioItens=i;break;}
+    const qtd=toNumero(palavrasNorm[i]);
+    if(qtd!==null&&i+1<n){
+      const ok2=i+2<n&&toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]);
+      const ok1=toProduto(palavrasNorm[i+1]);
+      if(ok2||ok1){inicioItens=i;break;}
+    }
+  }
+  if(inicioItens<1) return null;
+  const nomeRaw=palavrasOrig.slice(0,inicioItens).join(' ').trim();
+  if(!nomeRaw) return null;
+  if(PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
+  const itens=[];
+  let i=inicioItens;
+  while(i<n){
+    const qtd=toNumero(palavrasNorm[i]);
+    if(qtd!==null&&i+1<n){
+      if(i+2<n){const p2=toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]);if(p2){itens.push({quantidade:qtd,produto:p2});i+=3;continue;}}
+      const p1=toProduto(palavrasNorm[i+1]);if(p1){itens.push({quantidade:qtd,produto:p1});i+=2;continue;}
+    }
+    if(i+1<n){const p2=toProduto(palavrasNorm[i]+' '+palavrasNorm[i+1]);if(p2){itens.push({quantidade:1,produto:p2});i+=2;continue;}}
+    const p1=toProduto(palavrasNorm[i]);if(p1){itens.push({quantidade:1,produto:p1});i+=1;continue;}
+    i++;
+  }
+  if(!itens.length) return null;
+  return{nome:capitalizarNome(nomeRaw),itens};
+}
+
+// ─── PARSEAR PAGAMENTO ────────────────────────────────────────────────────────
+function parsearPagamento(linha) {
+  const tNorm = norm(linha);
+  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
+  const kwMatch = tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);
+  if (!kwMatch) return null;
+  const keyword = kwMatch[1];
+  const palavrasNorm = tNorm.split(/\s+/).filter(Boolean);
+  const palavrasOrig = linha.trim().split(/\s+/).filter(Boolean);
+  let kwIdx = -1;
+  for(let i=0;i<palavrasNorm.length;i++){
+    if(palavrasNorm[i]===keyword){ kwIdx=i; break; }
+  }
+  if(kwIdx<=0) return null;
+  const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
+  if(!nomeRaw) return null;
+  const nome = capitalizarNome(nomeRaw);
+  const restoNorm = palavrasNorm.slice(kwIdx+1).join(' ').trim();
+  const restoOrig = palavrasOrig.slice(kwIdx+1).join(' ').trim();
+  const palavrasResto = restoNorm
+    .replace(/\bde\b/g, ' ')
+    .replace(/\bpix\b/g, ' ')
+    .replace(/\breais\b/g, ' ')
+    .replace(/\br\$\s*/g, ' ')
+    .split(/\s+/).filter(Boolean);
+  for (let i = 0; i < palavrasResto.length; i++) {
+    const qtd = toNumero(palavrasResto[i]);
+    if (qtd === null) continue;
+    if (i + 2 < palavrasResto.length) {
+      const p2 = toProduto(palavrasResto[i+1] + ' ' + palavrasResto[i+2]);
+      if (p2) return { tipo: 'produto', nome, qtd, produto: p2 };
+    }
+    if (i + 1 < palavrasResto.length) {
+      const p1 = toProduto(palavrasResto[i+1]);
+      if (p1) return { tipo: 'produto', nome, qtd, produto: p1 };
+    }
+  }
+  for (let i = 0; i < palavrasResto.length; i++) {
+    if (i + 1 < palavrasResto.length) {
+      const p2 = toProduto(palavrasResto[i] + ' ' + palavrasResto[i+1]);
+      if (p2) return { tipo: 'produto', nome, qtd: 1, produto: p2 };
+    }
+    const p1 = toProduto(palavrasResto[i]);
+    if (p1) return { tipo: 'produto', nome, qtd: 1, produto: p1 };
+  }
+  const valor = extrairValor(restoOrig);
+  if (valor !== null && valor > 0) return { tipo: 'valor', nome, valor };
+  return null;
+}
+
+// ─── DETECTA COMANDO ──────────────────────────────────────────────────────────
+function detectarComando(texto) {
+  const t=norm(texto);
+
+  if(t.includes('compras quitadas')||t==='quitadas') return{tipo:'quitadas'};
+  if(t.includes('relatorio detalhado')||t.includes('relat\u00f3rio detalhado')) return{tipo:'detalhado'};
+  if(t==='relatorio'||t==='relatorio geral'||t==='relat\u00f3rio'||t==='relat\u00f3rio geral') return{tipo:'geral'};
+  if(t==='resumo'||t==='resumo do dia'||t==='resumo diario') return{tipo:'resumo'};
+  if(t==='produtos'||t==='lista produtos'||t==='listar produtos') return{tipo:'produtos'};
+  if(t==='ajuda'||t==='!ajuda'||t==='help') return{tipo:'ajuda'};
+
+  const mRelArg=texto.match(/^relat[oó]rio\s+(.+)$/i);
+  if(mRelArg){
+    const arg=mRelArg[1].trim();
+    if(isMes(arg)) return{tipo:'mes',mes:arg};
+    return{tipo:'individual',nome:arg};
+  }
+
+  const mSaldo=texto.match(/^saldo\s+(.+)$/i);
+  if(mSaldo) return{tipo:'individual',nome:mSaldo[1].trim()};
+
+  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[oó]rico\s+(.+)$/i);
+  if(mHist) return{tipo:'historico',nome:mHist[1].trim()};
+
+  const mCancel=texto.match(/^cancelar\s+(.+)$/i);
+  if(mCancel) return{tipo:'cancelar',nome:mCancel[1].trim()};
+
+  const mZerar=texto.match(/^zerar\s+(.+)$/i);
+  if(mZerar) return{tipo:'zerar',nome:mZerar[1].trim()};
+
+  const mPreco=texto.match(/^pre[cç]o\s+(\S+)\s+(.+)$/i);
+  if(mPreco){
+    const val=extrairValor(mPreco[2]);
+    if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};
+  }
+
+  const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-zà-ü\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
+  if(mNovoProd){
+    const val=extrairValor(mNovoProd[2]);
+    if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};
+  }
+
+  if(t==='cobrar'||t==='lembrete'||t==='lembretes') return{tipo:'lembrete'};
+
+  return{tipo:null};
+}
+
+// ─── AJUDA ────────────────────────────────────────────────────────────────────
+function gerarAjuda() {
+  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n_julia transferiu 15_\n_julia mandou 20 reais_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico de um cliente\n_resumo_ \u2014 resumo do dia\n\n\u2699\ufe0f *Gest\u00e3o:*\n_cancelar julia_ \u2014 desfaz \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_produtos_ \u2014 lista pre\u00e7os\n_novo produto brigadeiro 3.50_ \u2014 cria produto`;
+}
+
+// ─── PROCESSAR MENSAGEM ───────────────────────────────────────────────────────
+async function processarMensagem(sock, jid, texto, jidRemetente) {
+  const texto2=texto.trim();
+  if(!texto2) return;
+
+  const cmd=detectarComando(texto2);
+
+  if(cmd.tipo==='ajuda'){await sock.sendMessage(jid,{text:gerarAjuda()});return;}
+  if(cmd.tipo==='produtos'){await sock.sendMessage(jid,{text:listarProdutos()});return;}
+  if(cmd.tipo==='geral'){const r=await gerarRelatorioGeral();await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='detalhado'){const r=await gerarRelatorioDetalhado();await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='quitadas'){const r=await gerarRelatorioQuitados();await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='resumo'){const r=await gerarResumoDiario();await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='individual'){const r=await gerarSaldoIndividual(cmd.nome);await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='historico'){const r=await gerarHistoricoCliente(cmd.nome);await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='mes'){const r=await gerarRelatorioMes(cmd.mes);await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='lembrete'){await verificarLembretes(sock,jid);return;}
+  if(cmd.tipo==='cancelar'){const r=await cancelarLancamento(jid,cmd.nome);await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='zerar'){const r=await zerarCliente(cmd.nome);await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='mudarpreco'){const r=mudarPreco(cmd.produto,cmd.valor);await sock.sendMessage(jid,{text:r});return;}
+  if(cmd.tipo==='novoproduto'){const r=cadastrarNovoProduto(cmd.nome,cmd.valor);await sock.sendMessage(jid,{text:r});return;}
+
+  const pag=parsearPagamento(texto2);
+  if(pag){
+    let res;
+    if(pag.tipo==='produto') res=await processarPagamentoProduto(pag.nome,pag.qtd,pag.produto,jid);
+    else res=await processarPagamentoValor(pag.nome,pag.valor,jid);
+    if(res) await sock.sendMessage(jid,{text:res.msg});
+    return;
+  }
+
+  const parsed=parsearLinha(texto2);
+  if(!parsed) return;
+
+  const respostas=[];
+  for(const item of parsed.itens){
+    const resultado=await registrarOuAcumular(parsed.nome,item.produto,item.quantidade);
+    if(!resultado){
+      respostas.push(`\u274c Erro ao registrar ${item.quantidade}x ${nomeProdutoExib(item.produto)} para *${parsed.nome}*.`);
+      continue;
+    }
+    if(resultado.limiteBloqueado){
+      respostas.push(`\u26d4 *${resultado.cliente}* atingiu o limite de cr\u00e9dito!\nSaldo atual: R$ ${resultado.totalAtual.toFixed(2)} | Tentou adicionar: R$ ${resultado.valorNovo.toFixed(2)}\nLimite: R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}`);
+      continue;
+    }
+    pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:PRECOS[item.produto]*item.quantidade});
+    respostas.push(`${emojiProduto(item.produto)} *${resultado.cliente}* +${item.quantidade} ${nomeProdutoExib(item.produto)}\nTotal: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
+  }
+  if(respostas.length) await sock.sendMessage(jid,{text:respostas.join('\n\n')});
+}
+
+// ─── INICIAR BOT ──────────────────────────────────────────────────────────────
+async function iniciarBot() {
+  restaurarSessao();
+  const { version } = await fetchLatestBaileysVersion();
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+  const sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+    },
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
+    browser: Browsers.ubuntu('Chrome'),
+    syncFullHistory: false,
+  });
+
+  sockGlobal = sock;
+
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    await salvarSessaoNoRender();
+  });
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) { qrCodeData = qr; botConectado = false; }
+    if (connection === 'open') {
+      botConectado = true;
+      qrCodeData = null;
+      console.log('\u2705 Bot conectado!');
+      await salvarSessaoNoRender();
+      if (!agendamentosIniciados) {
+        agendamentosIniciados = true;
+        setInterval(async () => {
+          if (!jidGrupoGlobal || !sockGlobal) return;
+          const hora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }).split(' ')[1]?.split(':')[0];
+          if (parseInt(hora) === HORA_LEMBRETE) await verificarLembretes(sockGlobal, jidGrupoGlobal);
+        }, 60 * 60 * 1000);
+        setInterval(async () => {
+          if (!jidGrupoGlobal || !sockGlobal) return;
+          const hora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }).split(' ')[1]?.split(':')[0];
+          if (parseInt(hora) === HORA_RESUMO) {
+            const r = await gerarResumoDiario();
+            await sockGlobal.sendMessage(jidGrupoGlobal, { text: r });
+          }
+        }, 60 * 60 * 1000);
+      }
+    }
+    if (connection === 'close') {
+      botConectado = false;
+      const shouldReconnect = (lastDisconnect?.error instanceof Boom)
+        ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
+        : true;
+      if (shouldReconnect) { setTimeout(iniciarBot, 5000); }
+      else { console.log('Bot desconectado (logout). Reinicie manualmente.'); }
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;
+      const jid = msg.key.remoteJid;
+      if (!jid) continue;
+
+      const isGrupo = jid.endsWith('@g.us');
+      const nomeGrupoNorm = norm(GRUPO_NOME);
+
+      if (isGrupo) {
+        try {
+          const meta = await sock.groupMetadata(jid);
+          if (norm(meta.subject) !== nomeGrupoNorm) continue;
+          jidGrupoGlobal = jid;
+        } catch { continue; }
+      } else {
+        continue;
+      }
+
+      // Áudio
+      const audioMsg = msg.message?.audioMessage;
+      if (audioMsg) {
+        try {
+          const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
+          const mimeType = audioMsg.mimetype || 'audio/ogg';
+          const texto = await transcreverAudio(buffer, mimeType);
+          if (texto) {
+            console.log('[Áudio transcrito]:', texto);
+            await processarMensagem(sock, jid, texto, msg.key.participant);
+          }
+        } catch (e) { console.error('Erro áudio:', e.message); }
+        continue;
+      }
+
+      const texto =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.ephemeralMessage?.message?.conversation ||
+        msg.message?.ephemeralMessage?.message?.extendedTextMessage?.text ||
+        '';
+      if (!texto) continue;
+      await processarMensagem(sock, jid, texto, msg.key.participant);
+    }
+  });
+}
+
+iniciarBot().catch(err => console.error('Erro ao iniciar bot:', err.message));
