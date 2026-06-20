@@ -335,13 +335,38 @@ http.createServer(async(req,res)=>{
   } catch(e){res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');}
 }).listen(PORT,()=>console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
+// ─── RETRY COM BACKOFF EXPONENCIAL ───────────────────────────────────────────
+async function comRetry(fn, tentativas = 3, espera = 2000) {
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const ehRede = err.message?.includes('Premature close') ||
+                     err.message?.includes('fetch failed') ||
+                     err.message?.includes('ECONNRESET') ||
+                     err.message?.includes('ETIMEDOUT') ||
+                     err.message?.includes('socket hang up') ||
+                     err.message?.includes('network');
+      if (ehRede && i < tentativas - 1) {
+        console.log(`Erro de rede (tentativa ${i + 1}/${tentativas}): ${err.message}. Tentando novamente em ${espera}ms...`);
+        await new Promise(r => setTimeout(r, espera));
+        espera *= 2;
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 function getAuth() {
   return new JWT({email:GOOGLE_SERVICE_ACCOUNT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']});
 }
 async function getDoc() {
-  const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());
-  await doc.loadInfo();
-  return doc;
+  return await comRetry(async () => {
+    const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
+    await doc.loadInfo();
+    return doc;
+  });
 }
 async function getSheetSaldo() { return (await getDoc()).sheetsByIndex[0]; }
 async function getSheetHistorico() {
@@ -861,7 +886,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
