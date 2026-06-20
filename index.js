@@ -40,16 +40,28 @@ function delayReconexao() {
 }
 
 // ─── RETRY PARA GOOGLE SHEETS ────────────────────────────────────────────
-async function comRetry(fn, tentativas = 4, delayMs = 3000) {
+async function comRetry(fn, tentativas = 6, delayMs = 8000) {
   for (let i = 0; i < tentativas; i++) {
     try {
       return await fn();
     } catch (err) {
       const msg = err?.message || '';
-      const reintentavel = msg.includes('Premature close') || msg.includes('ECONNRESET') || msg.includes('socket hang up') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed') || msg.includes('ENOTFOUND') || msg.includes('network');
+      const reintentavel =
+        msg.includes('Premature close') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('socket hang up') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('fetch failed') ||
+        msg.includes('ENOTFOUND') ||
+        msg.includes('network') ||
+        msg.includes('connect ETIMEDOUT') ||
+        msg.includes('read ECONNRESET') ||
+        msg.includes('getaddrinfo') ||
+        msg.includes('Invalid response body');
       if (reintentavel && i < tentativas - 1) {
-        console.log(`Google Sheets: erro de rede (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${delayMs}ms...`);
-        await new Promise(r => setTimeout(r, delayMs));
+        const espera = delayMs * Math.pow(1.5, i);
+        console.log(`Google Sheets: erro de rede (${msg.split('\n')[0]}), tentativa ${i + 2}/${tentativas} em ${Math.round(espera / 1000)}s...`);
+        await new Promise(r => setTimeout(r, espera));
       } else {
         throw err;
       }
