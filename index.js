@@ -15,7 +15,9 @@ const FormData = require('form-data');
 const GRUPO_NOME   = process.env.GRUPO_NOME   || 'vendas';
 const SPREADSHEET_ID               = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-const GOOGLE_PRIVATE_KEY           = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const GOOGLE_PRIVATE_KEY           = (process.env.GOOGLE_PRIVATE_KEY || '')
+  .replace(/\\n/g, '\n')    // \n literal (barra simples) → quebra real
+  .replace(/\\\\n/g, '\n'); // \\n literal (barra dupla) → quebra real
 const PORT             = process.env.PORT  || 3000;
 const RENDER_API_KEY   = process.env.RENDER_API_KEY   || '';
 const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID|| '';
@@ -270,7 +272,6 @@ function getAuth() {
 }
 
 // ─── getDoc COM RETRY AUTOMÁTICO ──────────────────────────────────────────────
-// Corrige "Premature close" causado pela hibernação do Render
 async function getDoc(tentativas = 3, espera = 2000) {
   let ultimoErro;
   for (let i = 1; i <= tentativas; i++) {
@@ -291,7 +292,7 @@ async function getDoc(tentativas = 3, espera = 2000) {
       if (ehPrematureClose && i < tentativas) {
         console.log(`Planilha: tentativa ${i}/${tentativas} falhou (${err.message}). Aguardando ${espera}ms...`);
         await new Promise(r => setTimeout(r, espera));
-        espera = espera * 2; // backoff exponencial
+        espera = espera * 2;
       } else {
         throw err;
       }
