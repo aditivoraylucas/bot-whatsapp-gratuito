@@ -318,7 +318,6 @@ async function limparCREDSnoRender() {
     });
     const envVars=await resGet.json();
     const existente=Array.isArray(envVars)?envVars:(envVars.envVars||[]);
-    // Remove CREDS_JSON para forçar novo QR Code no próximo deploy
     const novas=existente
       .filter(v=>v.key!=='CREDS_JSON')
       .map(v=>({key:v.key,value:v.value}));
@@ -359,7 +358,7 @@ http.createServer(async(req,res)=>{
 }).listen(PORT,()=>console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
 // ─── RETRY COM BACKOFF EXPONENCIAL ───────────────────────────────────────────
-async function comRetry(fn, tentativas = 3, espera = 2000) {
+async function comRetry(fn, tentativas = 4, espera = 2000) {
   for (let i = 0; i < tentativas; i++) {
     try {
       return await fn();
@@ -369,11 +368,14 @@ async function comRetry(fn, tentativas = 3, espera = 2000) {
                      err.message?.includes('ECONNRESET') ||
                      err.message?.includes('ETIMEDOUT') ||
                      err.message?.includes('socket hang up') ||
-                     err.message?.includes('network');
+                     err.message?.includes('network') ||
+                     err.message?.includes('Invalid response body');
       if (ehRede && i < tentativas - 1) {
         console.log(`Erro de rede (tentativa ${i + 1}/${tentativas}): ${err.message}. Tentando novamente em ${espera}ms...`);
         await new Promise(r => setTimeout(r, espera));
         espera *= 2;
+        // ✅ CORREÇÃO: invalida o cache do JWT para forçar novo token na próxima tentativa
+        _jwtCache = null;
       } else {
         throw err;
       }
@@ -381,9 +383,25 @@ async function comRetry(fn, tentativas = 3, espera = 2000) {
   }
 }
 
+// ─── CACHE DO JWT (evita criar novo cliente a cada chamada) ───────────────────
+let _jwtCache = null;
+let _jwtCriadoEm = 0;
+const JWT_TTL_MS = 50 * 60 * 1000; // 50 minutos (token expira em 60)
+
 function getAuth() {
-  return new JWT({email:GOOGLE_SERVICE_ACCOUNT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']});
+  const agora2 = Date.now();
+  if (_jwtCache && (agora2 - _jwtCriadoEm) < JWT_TTL_MS) {
+    return _jwtCache;
+  }
+  _jwtCache = new JWT({
+    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key: GOOGLE_PRIVATE_KEY,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  _jwtCriadoEm = agora2;
+  return _jwtCache;
 }
+
 async function getDoc() {
   return await comRetry(async () => {
     const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
@@ -909,7 +927,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1181,8 +1199,6 @@ async function conectarBot() {
       if (loggedOut) {
         console.log('Sessao expirada. Removendo credenciais locais e limpando Render...');
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
-        // ✅ CORREÇÃO: remove o CREDS_JSON desatualizado do Render
-        // para que o próximo deploy solicite um novo QR Code
         await limparCREDSnoRender();
       }
       if (!reconectando) {
@@ -1201,7 +1217,6 @@ async function conectarBot() {
         if (!jidGrupoGlobal || msg.key.remoteJid !== jidGrupoGlobal) continue;
         if (msg.message?.protocolMessage) continue;
 
-        // Áudio
         const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (msg.message?.audioMessage && GROQ_API_KEY) {
           try {
