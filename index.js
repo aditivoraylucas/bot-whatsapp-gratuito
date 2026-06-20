@@ -53,7 +53,7 @@ function agendarSalvarSessao() {
 }
 
 // ─── RETRY PARA GOOGLE SHEETS ────────────────────────────────────────────
-async function comRetry(fn, tentativas = 6, delayMs = 8000) {
+async function comRetry(fn, tentativas = 8, delayMs = 5000) {
   for (let i = 0; i < tentativas; i++) {
     try {
       return await fn();
@@ -387,6 +387,7 @@ async function preAquecerToken() {
   }
 }
 
+// Renova o token a cada 10 minutos para evitar expiração no plano gratuito do Render
 setInterval(async () => {
   try {
     _jwtInstance = null;
@@ -397,9 +398,10 @@ setInterval(async () => {
     console.warn('Aviso: falha ao renovar token OAuth:', e.message);
     _jwtInstance = null;
   }
-}, 45 * 60 * 1000);
+}, 10 * 60 * 1000);
 
-async function getDoc(){return await comRetry(async()=>{const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;});}
+// Força reset do JWT antes de cada operação para garantir token fresco
+async function getDoc(){return await comRetry(async()=>{_jwtInstance=null;const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());await doc.loadInfo();return doc;});}
 async function getSheetSaldo(){return(await getDoc()).sheetsByIndex[0];}
 async function getSheetHistorico(){
   const doc=await getDoc();
