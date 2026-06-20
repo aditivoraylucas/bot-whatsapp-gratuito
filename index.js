@@ -927,7 +927,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1194,10 +1194,11 @@ async function conectarBot() {
     if (connection === 'close') {
       botConectado = false;
       const statusCode = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      // ✅ CORREÇÃO: código 515 = sessão rejeitada/conflito — tratar igual a loggedOut
+      const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 515;
       console.log(`Conexao encerrada. Codigo: ${statusCode}. LoggedOut: ${loggedOut}`);
       if (loggedOut) {
-        console.log('Sessao expirada. Removendo credenciais locais e limpando Render...');
+        console.log('Sessao expirada/conflito (codigo ' + statusCode + '). Removendo credenciais locais e limpando Render...');
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
         await limparCREDSnoRender();
       }
