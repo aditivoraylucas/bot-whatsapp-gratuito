@@ -1092,7 +1092,8 @@ function agendarTarefas(sock, jid) {
   },60*60*1000);
 }
 
-let reconectando=false;
+// ─── FLAG DE RECONEXÃO ────────────────────────────────────────────────────────
+let reconectando = false;
 
 async function processarTexto(texto, jid, sock) {
   const cmd=detectarComando(texto);
@@ -1193,20 +1194,28 @@ async function conectarBot() {
     }
     if (connection === 'close') {
       botConectado = false;
-      const statusCode = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
-      // ✅ CORREÇÃO: código 515 = restartRequired → NÃO é logout, apenas reinicia o socket
-      // Tratar 515 como loggedOut causava deleção desnecessária das credenciais e loop de QR Code
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      const statusCode = (lastDisconnect?.error instanceof Boom)
+        ? lastDisconnect.error.output?.statusCode
+        : null;
+
+      // Código 515 = restartRequired → NÃO é logout, apenas reinicia o socket imediatamente
+      // Código 401 = loggedOut → sessão expirou, limpar credenciais
+      const isRestartRequired = statusCode === 515;
+      const loggedOut = statusCode === DisconnectReason.loggedOut; // 401
+
       console.log(`Conexao encerrada. Codigo: ${statusCode}. LoggedOut: ${loggedOut}`);
+
       if (loggedOut) {
         console.log('Sessao expirada. Removendo credenciais locais e limpando Render...');
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
         await limparCREDSnoRender();
       }
+
       if (!reconectando) {
         reconectando = true;
-        const delay = loggedOut ? 3000 : 5000;
-        setTimeout(() => conectarBot(), delay);
+        // Código 515: reconecta imediatamente (sem delay), pois é apenas restart do socket
+        const delay = isRestartRequired ? 0 : (loggedOut ? 3000 : 5000);
+        setTimeout(() => { reconectando = false; conectarBot(); }, delay);
       }
     }
   });
