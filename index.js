@@ -393,7 +393,7 @@ async function comRetry(fn, tentativas = 4, espera = 2000) {
         console.log(`Erro de rede (tentativa ${i + 1}/${tentativas}): ${err.message}. Tentando novamente em ${espera}ms...`);
         await new Promise(r => setTimeout(r, espera));
         espera *= 2;
-        // ✅ CORREÇÃO: invalida o cache do JWT para forçar novo token na próxima tentativa
+        // invalida o cache do JWT para forçar novo token na próxima tentativa
         _jwtCache = null;
       } else {
         throw err;
@@ -927,7 +927,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
@@ -1194,11 +1194,12 @@ async function conectarBot() {
     if (connection === 'close') {
       botConectado = false;
       const statusCode = (lastDisconnect?.error instanceof Boom) ? lastDisconnect.error.output?.statusCode : null;
-      // ✅ CORREÇÃO: código 515 = sessão rejeitada/conflito — tratar igual a loggedOut
-      const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 515;
+      // ✅ CORREÇÃO: código 515 = restartRequired → NÃO é logout, apenas reinicia o socket
+      // Tratar 515 como loggedOut causava deleção desnecessária das credenciais e loop de QR Code
+      const loggedOut = statusCode === DisconnectReason.loggedOut;
       console.log(`Conexao encerrada. Codigo: ${statusCode}. LoggedOut: ${loggedOut}`);
       if (loggedOut) {
-        console.log('Sessao expirada/conflito (codigo ' + statusCode + '). Removendo credenciais locais e limpando Render...');
+        console.log('Sessao expirada. Removendo credenciais locais e limpando Render...');
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
         await limparCREDSnoRender();
       }
