@@ -927,7 +927,7 @@ const PALAVRAS_RESERVADAS = new Set([
 
 function parsearLinha(linha) {
   const limpa=linha
-    .replace(/[.!?,;:]+(\\s|$)/g, '$1')
+    .replace(/[.!?,;:]+(\s|$)/g, '$1')
     .replace(/,/g,' ')
     .replace(/\b(mais|e|de)\b/gi,' ')
     .replace(/\+/g,' ')
