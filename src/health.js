@@ -1,7 +1,7 @@
 // ─── SERVIDOR HTTP (health, webhook, pairing) ─────────────────────────────────
 const http   = require('http');
 const crypto = require('crypto');
-const { PORT, GITHUB_WEBHOOK_SECRET } = require('./config');
+const { PORT, GITHUB_WEBHOOK_SECRET, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY } = require('./config');
 
 // Referências de estado injetadas pelo bot.js
 let _getBotConectado  = () => false;
@@ -16,6 +16,67 @@ function init({ getBotConectado, getSockGlobal, getPairingNumero, setPairingPend
   _getPairingNumero   = getPairingNumero;
   _setPairingPendente = setPairingPendente;
   _setPairingNumero   = setPairingNumero;
+}
+
+// ── Diagnóstico Google Sheets ──────────────────────────────────────────────
+async function testarPlanilha() {
+  const resultado = {
+    spreadsheet_id:    SPREADSHEET_ID || '❌ VAZIO',
+    service_account:   GOOGLE_SERVICE_ACCOUNT_EMAIL || '❌ VAZIO',
+    private_key_ok:    GOOGLE_PRIVATE_KEY ? '✅ presente' : '❌ AUSENTE',
+    token_step:        null,
+    sheets_step:       null,
+    erro_detalhado:    null,
+  };
+
+  // Passo 1: obter token OAuth
+  try {
+    const agora = Date.now();
+    const iat = Math.floor(agora / 1000);
+    const exp = iat + 3600;
+    const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      iss:   GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      scope: 'https://www.googleapis.com/auth/spreadsheets',
+      aud:   'https://oauth2.googleapis.com/token',
+      iat, exp,
+    })).toString('base64url');
+    const signingInput = `${header}.${payload}`;
+    const key = (GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+    const sign = crypto.createSign('RSA-SHA256');
+    sign.update(signingInput);
+    const signature = sign.sign(key, 'base64url');
+    const jwt = `${signingInput}.${signature}`;
+
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+    });
+    const txt = await resp.text();
+    if (!resp.ok) {
+      resultado.token_step = `❌ FALHOU (${resp.status}): ${txt}`;
+      return resultado;
+    }
+    const data = JSON.parse(txt);
+    resultado.token_step = `✅ Token obtido (expira em ${data.expires_in}s)`;
+    const token = data.access_token;
+
+    // Passo 2: acessar a planilha
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=spreadsheetId,properties(title)`;
+    const r2 = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const txt2 = await r2.text();
+    if (!r2.ok) {
+      resultado.sheets_step = `❌ FALHOU (${r2.status})`;
+      resultado.erro_detalhado = txt2.length > 500 ? txt2.substring(0, 500) + '...' : txt2;
+    } else {
+      const d2 = JSON.parse(txt2);
+      resultado.sheets_step = `✅ Planilha acessada: "${d2.properties?.title}" (ID: ${d2.spreadsheetId})`;
+    }
+  } catch (e) {
+    resultado.erro_detalhado = e.message;
+  }
+  return resultado;
 }
 
 // ── Páginas HTML de pareamento ────────────────────────────────────────────────
@@ -53,7 +114,7 @@ function paginaPairing(estado) {
   </div></body></html>`;
 }
 
-// ── Servidor HTTP ─────────────────────────────────────────────────────────────
+// ── Servidor HTTP ────────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   try {
     // GET /health
@@ -67,6 +128,39 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/status') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ conectado: _getBotConectado() }));
+      return;
+    }
+
+    // GET /test-sheets — diagnóstico completo da planilha
+    if (req.method === 'GET' && req.url === '/test-sheets') {
+      const r = await testarPlanilha();
+      const cor = (v) => v && v.startsWith('✅') ? '#166534' : '#991b1b';
+      const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Diagnóstico Planilha</title>
+        <style>
+          body{font-family:monospace;background:#f8fafc;padding:32px;max-width:780px;margin:auto}
+          h1{font-family:sans-serif;color:#1e293b} table{width:100%;border-collapse:collapse;margin-top:20px}
+          td{padding:12px 16px;border:1px solid #e2e8f0;vertical-align:top;word-break:break-all}
+          td:first-child{font-weight:bold;color:#475569;white-space:nowrap;width:220px;background:#f1f5f9}
+          .ok{color:#166534} .err{color:#991b1b}
+          .box{background:#1e293b;color:#86efac;padding:20px;border-radius:10px;margin-top:24px;white-space:pre-wrap;font-size:0.88em}
+        </style></head><body>
+        <h1>🔍 Diagnóstico Google Sheets</h1>
+        <table>
+          <tr><td>SPREADSHEET_ID</td><td>${r.spreadsheet_id}</td></tr>
+          <tr><td>SERVICE_ACCOUNT</td><td>${r.service_account}</td></tr>
+          <tr><td>PRIVATE_KEY</td><td>${r.private_key_ok}</td></tr>
+          <tr><td>Token OAuth</td><td class="${r.token_step?.startsWith('✅')?'ok':'err'}">${r.token_step || '⏳ não testado'}</td></tr>
+          <tr><td>Acesso à planilha</td><td class="${r.sheets_step?.startsWith('✅')?'ok':'err'}">${r.sheets_step || '⏳ não testado'}</td></tr>
+        </table>
+        ${r.erro_detalhado ? `<div class="box">${r.erro_detalhado}</div>` : ''}
+        <p style="margin-top:24px;font-family:sans-serif;color:#64748b;font-size:0.85em">
+          Atualize a página a qualquer momento para testar novamente.
+        </p>
+      </body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
       return;
     }
 
