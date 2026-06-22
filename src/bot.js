@@ -18,6 +18,7 @@ let ultimoDiaLembrete     = '';
 let ultimoDiaResumo       = '';
 let pairingPendente       = false;
 let pairingNumero         = '';
+let tentativasReconexao   = 0;
 
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
@@ -29,7 +30,6 @@ function setPairingNumero(v)   { pairingNumero = v; }
 function restaurarSessao() {
   try {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
-    // Se já existe localmente (restart dentro do mesmo deploy), usa sem sobrescrever
     if (fs.existsSync(credsPath)) {
       console.log('[restaurarSessao] Usando creds.json local existente.');
       return true;
@@ -46,15 +46,12 @@ function restaurarSessao() {
   } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
 }
 
-// Salva as creds na Render API APENAS para o próximo deploy poder restaurar.
-// Não reinicia o processo — o arquivo local já é suficiente para o processo atual.
 async function salvarSessaoNoRender() {
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (!fs.existsSync(credsPath)) return;
     const conteudo = fs.readFileSync(credsPath, 'utf8');
-    // Evita chamada desnecessária se o conteúdo for idêntico
     if (conteudo === process.env.CREDS_JSON) return;
     const resGet   = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
@@ -85,13 +82,18 @@ async function iniciarBot() {
     logger,
     browser: Browsers.ubuntu('Chrome'),
     syncFullHistory: false,
+    connectTimeoutMs: 60_000,       // aguarda até 60s para conectar
+    keepAliveIntervalMs: 15_000,    // envia ping a cada 15s para manter a conexão viva
+    retryRequestDelayMs: 2_000,     // delay entre tentativas internas do Baileys
+    maxMsgRetryCount: 5,
+    getMessage: async () => undefined,
   });
 
   sockGlobal = sock;
 
   sock.ev.on('creds.update', async () => {
-    await saveCreds(); // salva localmente no AUTH_DIR
-    await salvarSessaoNoRender(); // atualiza env var no Render (para próximo deploy)
+    await saveCreds();
+    await salvarSessaoNoRender();
   });
 
   sock.ev.on('connection.update', async (update) => {
@@ -102,8 +104,9 @@ async function iniciarBot() {
     }
 
     if (connection === 'open') {
-      botConectado    = true;
-      pairingPendente = false;
+      botConectado      = true;
+      pairingPendente   = false;
+      tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
 
@@ -129,9 +132,17 @@ async function iniciarBot() {
     if (connection === 'close') {
       botConectado          = false;
       agendamentosIniciados = false;
-      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('Conexão fechada. Reconectando:', shouldReconnect);
-      if (shouldReconnect) setTimeout(iniciarBot, 5000);
+      const statusCode      = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`Conexão fechada (código: ${statusCode}). Reconectando: ${shouldReconnect}`);
+
+      if (shouldReconnect) {
+        tentativasReconexao++;
+        // Delay progressivo: 5s, 10s, 15s... até no máximo 30s
+        const delay = Math.min(5000 * tentativasReconexao, 30000);
+        console.log(`[reconexão] Tentativa ${tentativasReconexao} em ${delay / 1000}s...`);
+        setTimeout(iniciarBot, delay);
+      }
     }
   });
 
