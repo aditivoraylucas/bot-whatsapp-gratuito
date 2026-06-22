@@ -1,6 +1,15 @@
 process.on('uncaughtException', err => console.error('Erro nao tratado:', err.message));
 process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?.message || err));
 
+// ─── FIX: força fetch nativo do Node.js (undici) para googleapis ──────────────
+// Resolve "Premature close" ao renovar token OAuth no Render/Railway
+if (typeof globalThis.fetch === 'undefined') {
+  const { default: nodeFetch } = await import('node-fetch').catch(() => ({ default: undefined }));
+  if (nodeFetch) globalThis.fetch = nodeFetch;
+}
+// Garante que o google-auth-library use o fetch nativo (Node 18+)
+process.env.GOOGLE_SDK_NODE_LOGGING = 'none';
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
@@ -23,6 +32,25 @@ const GROQ_API_KEY     = process.env.GROQ_API_KEY     || '';
 const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || '';
 
 const AUTH_DIR = 'auth_info';
+
+// ─── RETRY COM BACKOFF para chamadas Google Sheets ───────────────────────────
+async function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isPrematureClose = err?.message?.includes('Premature close') || err?.message?.includes('fetch failed');
+      const isUltimaTentativa = i === tentativas - 1;
+      if (isPrematureClose && !isUltimaTentativa) {
+        const espera = (i + 1) * 2000;
+        console.log(`[${labelErro}] Tentativa ${i + 1}/${tentativas} falhou (${err.message}). Aguardando ${espera / 1000}s...`);
+        await new Promise(r => setTimeout(r, espera));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 // ─── TRANSCRIÇÃO DE ÁUDIO VIA GROQ WHISPER ───────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
@@ -224,13 +252,13 @@ let agendamentosIniciados = false;
 let ultimoDiaLembrete = '';
 let ultimoDiaResumo   = '';
 // Pairing Code: estado
-let pairingPendente = false;  // true enquanto aguarda o usuário digitar o número
-let pairingNumero   = '';     // número atual aguardando código
+let pairingPendente = false;
+let pairingNumero   = '';
 
 function restaurarSessao() {
   try {
     const credsJson=process.env.CREDS_JSON;
-    if(!credsJson) return false;
+    if(!credsJson) { console.log('[restaurarSessao] CREDS_JSON não definido – será necessário novo pairing.'); return false; }
     if(!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR,{recursive:true});
     fs.writeFileSync(path.join(AUTH_DIR,'creds.json'),credsJson,'utf8');
     console.log('Sessao restaurada do CREDS_JSON');
@@ -317,6 +345,13 @@ function paginaPairing(estado) {
 // ─── SERVIDOR HTTP ─────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   try {
+    // ── Endpoint de health check (para UptimeRobot / keep-alive) ──
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), conectado: botConectado }));
+      return;
+    }
+
     // Webhook GitHub
     if (req.method === 'POST' && req.url === '/webhook') {
       const chunks = [];
@@ -350,12 +385,10 @@ const server = http.createServer(async (req, res) => {
         }
         pairingNumero = numero;
         pairingPendente = true;
-        // Solicita o código ao Baileys
         try {
           if (sockGlobal) {
             const code = await sockGlobal.requestPairingCode(numero);
             console.log(`Pairing code para ${numero}:`, code);
-            // Redireciona para página que exibe o código
             res.writeHead(302, { Location: `/codigo?c=${encodeURIComponent(code)}` });
             res.end();
           } else {
@@ -380,7 +413,6 @@ const server = http.createServer(async (req, res) => {
       ol{text-align:left;color:#374151;line-height:2;padding-left:20px} .sub{font-size:0.85em;color:#9ca3af;margin-top:16px}
       a{display:inline-block;margin-top:20px;color:#16a34a;text-decoration:none;font-weight:600}</style>
       <script>
-        // Verifica a cada 5s se o bot já conectou e redireciona para /
         setInterval(async()=>{ const r=await fetch('/status'); const d=await r.json(); if(d.conectado) location.href='/'; }, 5000);
       </script></head>
       <body><div class="card">
@@ -403,7 +435,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Endpoint JSON de status (usado pelo polling da página do código)
+    // Endpoint JSON de status
     if (req.method === 'GET' && req.url === '/status') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ conectado: botConectado }));
@@ -426,9 +458,11 @@ function getAuth() {
   return new JWT({email:GOOGLE_SERVICE_ACCOUNT_EMAIL,key:GOOGLE_PRIVATE_KEY,scopes:['https://www.googleapis.com/auth/spreadsheets']});
 }
 async function getDoc() {
-  const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());
-  await doc.loadInfo();
-  return doc;
+  return comRetry(async () => {
+    const doc=new GoogleSpreadsheet(SPREADSHEET_ID,getAuth());
+    await doc.loadInfo();
+    return doc;
+  }, 4, 'getDoc');
 }
 async function getSheetSaldo() { return (await getDoc()).sheetsByIndex[0]; }
 async function getSheetHistorico() {
@@ -457,11 +491,11 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
       const totalAcumulado = parseFloat(existente.get('Total')||'0')+valorNovo;
       existente.set('Quantidade',qtdAcumulada); existente.set('Total',totalAcumulado.toFixed(2)); existente.set('UltimaCompra',agora());
       await existente.save();
-      await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
+      await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)})), 4, 'addRow Historico Compra');
       return {cliente,totalAcumulado,qtdAcumulada};
     } else {
-      await sheet.addRow({Cliente:cliente,Produto:produto,Quantidade:quantidade,Total:valorNovo.toFixed(2),UltimaCompra:agora()});
-      await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)});
+      await comRetry(() => sheet.addRow({Cliente:cliente,Produto:produto,Quantidade:quantidade,Total:valorNovo.toFixed(2),UltimaCompra:agora()}), 4, 'addRow Saldo');
+      await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:cliente,Tipo:'Compra',Produto:produto,Quantidade:quantidade,Valor:valorNovo.toFixed(2)})), 4, 'addRow Historico Compra');
       return {cliente,totalAcumulado:valorNovo,qtdAcumulada:quantidade};
     }
   } catch(err){console.error('Erro planilha:',err.message);return null;}
@@ -538,12 +572,12 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const totalAtual= parseFloat(row.get('Total')||'0');
     const pago = qtdAtual>0 ? (totalAtual/qtdAtual)*qtdPaga : 0;
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente:row.get('Cliente'),produto,quantidade:qtdPaga,valor:pago});
-    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)});
+    await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)})), 4, 'addRow Pagamento Produto');
     if(novaQtd===0){ await row.delete(); return{ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`}; }
     const novoTotal=totalAtual-pago;
     row.set('Quantidade',novaQtd); row.set('Total',novoTotal.toFixed(2)); await row.save();
     return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
+  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
@@ -559,7 +593,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
     if(!rowsCliente.length) return{ok:false,msg:`❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
     const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
-    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)});
+    await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)})), 4, 'addRow Pagamento Valor');
     if(valorPago>=totalDevido){
       for(const r of rowsCliente) await r.delete();
       return{ok:true,msg:`✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.`};
@@ -578,7 +612,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       }
     }
     return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.'};}
+  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function gerarRelatorioGeral() {
@@ -841,7 +875,7 @@ async function zerarCliente(nomeDigitado) {
     if(!rowsCliente.length) return `✅ *${nomeCanon}* já está sem dívidas.`;
     const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     for(const r of rowsCliente) await r.delete();
-    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
+    await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)})), 4, 'addRow Zerar');
     return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
   } catch(err){console.error('Erro zerar:',err.message);return '❌ Erro ao zerar cliente.';}
 }
@@ -994,7 +1028,6 @@ async function iniciarBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Ignora QR — usamos Pairing Code
     if (qr) {
       console.log('QR disponível (use o formulário web para parear por número)');
     }
