@@ -16,6 +16,11 @@ const DIAS_LEMBRETE                = parseInt(process.env.DIAS_LEMBRETE || '7');
 const HORA_LEMBRETE                = parseInt(process.env.HORA_LEMBRETE || '20');
 const HORA_RESUMO                  = parseInt(process.env.HORA_RESUMO   || '21');
 
+// ─── DEBUG: confirma variáveis críticas no startup ────────────────────────────
+console.log('[config] SPREADSHEET_ID:', SPREADSHEET_ID || '❌ INDEFINIDO');
+console.log('[config] SERVICE_ACCOUNT:', GOOGLE_SERVICE_ACCOUNT_EMAIL || '❌ INDEFINIDO');
+console.log('[config] PRIVATE_KEY ok:', GOOGLE_PRIVATE_KEY ? '✅' : '❌ INDEFINIDA');
+
 module.exports = {
   GRUPO_NOME, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY,
   PORT, RENDER_API_KEY, RENDER_SERVICE_ID, GROQ_API_KEY, GITHUB_WEBHOOK_SECRET,
