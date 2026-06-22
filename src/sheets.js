@@ -110,6 +110,24 @@ async function getSheetsMeta() {
   return comRetry(() => sheetsGET('?fields=sheets(properties(sheetId,title,index))'), 4, 'getSheetsMeta');
 }
 
+// ── Garante que a aba 0 se chama "Saldo" ─────────────────────────────────────
+async function ensureSaldoSheet(meta) {
+  const aba0 = meta.sheets[0].properties;
+  if (aba0.title === 'Saldo') return aba0;
+  // Já existe aba chamada Saldo em outra posição? Não faz nada.
+  const jaExiste = meta.sheets.find(s => s.properties.title === 'Saldo');
+  if (jaExiste) return jaExiste.properties;
+  // Renomeia a aba 0 para "Saldo"
+  console.log(`[sheets] Renomeando aba "${aba0.title}" → "Saldo"`);
+  await comRetry(() => sheetsPOST('/batchUpdate', {
+    requests: [{ updateSheetProperties: {
+      properties: { sheetId: aba0.sheetId, title: 'Saldo' },
+      fields: 'title',
+    }}],
+  }), 4, 'renomearSaldo');
+  return { ...aba0, title: 'Saldo' };
+}
+
 async function ensureHeaders(sheetTitle, headers, sheetId) {
   // Verifica se a primeira linha já tem cabeçalhos; se não, insere
   const range = `${sheetTitle}!A1:${String.fromCharCode(64 + headers.length)}1`;
@@ -181,7 +199,7 @@ async function deleteRows(sheetId, rowIndexes) {
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const meta     = await getSheetsMeta();
-    const saldoProp = meta.sheets[0].properties;
+    const saldoProp = await ensureSaldoSheet(meta);
     await ensureHeaders('Saldo', HDR_SALDO, saldoProp.sheetId);
     const histProp = await getOrCreateHistSheet(meta);
     await ensureHeaders('Historico', HDR_HIST, histProp.sheetId);
@@ -227,7 +245,8 @@ async function cancelarLancamento(jid, nomeDigitado) {
     hist.splice(idx, 1);
 
     const meta      = await getSheetsMeta();
-    const saldoId   = meta.sheets[0].properties.sheetId;
+    const saldoProp = await ensureSaldoSheet(meta);
+    const saldoId   = saldoProp.sheetId;
     const histSheet = meta.sheets.find(s => s.properties.title === 'Historico');
     const histId    = histSheet ? histSheet.properties.sheetId : null;
     const rowsSaldo = await getRows('Saldo', HDR_SALDO);
@@ -280,7 +299,8 @@ async function cancelarLancamento(jid, nomeDigitado) {
 async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid) {
   try {
     const meta    = await getSheetsMeta();
-    const saldoId = meta.sheets[0].properties.sheetId;
+    const saldoProp = await ensureSaldoSheet(meta);
+    const saldoId = saldoProp.sheetId;
     const histProp = await getOrCreateHistSheet(meta);
     const rows    = await getRows('Saldo', HDR_SALDO);
     const row     = rows.find(r => mesmoNome(r.Cliente, clienteEnviado) && norm(r.Produto) === norm(produto));
@@ -306,7 +326,8 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
 async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   try {
     const meta    = await getSheetsMeta();
-    const saldoId = meta.sheets[0].properties.sheetId;
+    const saldoProp = await ensureSaldoSheet(meta);
+    const saldoId = saldoProp.sheetId;
     await getOrCreateHistSheet(meta);
     const rows    = await getRows('Saldo', HDR_SALDO);
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
@@ -584,7 +605,8 @@ async function verificarLembretes(sock, jid) {
 async function zerarCliente(nomeDigitado) {
   try {
     const meta    = await getSheetsMeta();
-    const saldoId = meta.sheets[0].properties.sheetId;
+    const saldoProp = await ensureSaldoSheet(meta);
+    const saldoId = saldoProp.sheetId;
     await getOrCreateHistSheet(meta);
     const rows    = await getRows('Saldo', HDR_SALDO);
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
