@@ -26,6 +26,37 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
+// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────
+function limparSessaoLocal() {
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      console.log('[sessão] Pasta auth_info removida (sessão inválida).');
+    }
+  } catch (e) { console.error('Erro ao limpar sessão local:', e.message); }
+}
+
+async function limparSessaoNoRender() {
+  try {
+    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+    const resGet  = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
+    });
+    const envVars  = await resGet.json();
+    const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
+    // Remove CREDS_JSON da lista
+    const novas = existente
+      .filter(v => v.key !== 'CREDS_JSON')
+      .map(v => ({ key: v.key, value: v.value }));
+    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(novas),
+    });
+    console.log('[sessão] CREDS_JSON inválido removido da Render API.');
+  } catch (e) { console.error('Erro ao limpar CREDS_JSON no Render:', e.message); }
+}
+
 // ── Sessão persistente ──────────────────────────────────────────────────────────
 function restaurarSessao() {
   try {
@@ -82,9 +113,9 @@ async function iniciarBot() {
     logger,
     browser: Browsers.ubuntu('Chrome'),
     syncFullHistory: false,
-    connectTimeoutMs: 60_000,       // aguarda até 60s para conectar
-    keepAliveIntervalMs: 15_000,    // envia ping a cada 15s para manter a conexão viva
-    retryRequestDelayMs: 2_000,     // delay entre tentativas internas do Baileys
+    connectTimeoutMs: 60_000,
+    keepAliveIntervalMs: 15_000,
+    retryRequestDelayMs: 2_000,
     maxMsgRetryCount: 5,
     getMessage: async () => undefined,
   });
@@ -104,8 +135,8 @@ async function iniciarBot() {
     }
 
     if (connection === 'open') {
-      botConectado      = true;
-      pairingPendente   = false;
+      botConectado        = true;
+      pairingPendente     = false;
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
@@ -133,12 +164,19 @@ async function iniciarBot() {
       botConectado          = false;
       agendamentosIniciados = false;
       const statusCode      = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`Conexão fechada (código: ${statusCode}). Reconectando: ${shouldReconnect}`);
+      const loggedOut       = statusCode === DisconnectReason.loggedOut;
+      console.log(`Conexão fechada (código: ${statusCode}). Reconectando: ${!loggedOut}`);
 
-      if (shouldReconnect) {
+      if (loggedOut) {
+        // Sessão inválida: limpa tudo e aguarda novo pairing
+        console.log('[sessão] Sessão expirada/inválida. Limpando credenciais...');
+        limparSessaoLocal();
+        await limparSessaoNoRender();
+        tentativasReconexao = 0;
+        // Reinicia o bot limpo para aguardar novo pairing
+        setTimeout(iniciarBot, 3000);
+      } else {
         tentativasReconexao++;
-        // Delay progressivo: 5s, 10s, 15s... até no máximo 30s
         const delay = Math.min(5000 * tentativasReconexao, 30000);
         console.log(`[reconexão] Tentativa ${tentativasReconexao} em ${delay / 1000}s...`);
         setTimeout(iniciarBot, delay);
