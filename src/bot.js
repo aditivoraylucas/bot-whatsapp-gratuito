@@ -44,7 +44,6 @@ async function limparSessaoNoRender() {
     });
     const envVars  = await resGet.json();
     const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
-    // Remove CREDS_JSON da lista
     const novas = existente
       .filter(v => v.key !== 'CREDS_JSON')
       .map(v => ({ key: v.key, value: v.value }));
@@ -79,22 +78,44 @@ function restaurarSessao() {
 
 async function salvarSessaoNoRender() {
   try {
-    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
+      console.warn('[sessão] RENDER_API_KEY ou RENDER_SERVICE_ID não definidos — sessão não será salva.');
+      return;
+    }
     const credsPath = path.join(AUTH_DIR, 'creds.json');
-    if (!fs.existsSync(credsPath)) return;
+    if (!fs.existsSync(credsPath)) {
+      console.warn('[sessão] creds.json não encontrado — nada a salvar.');
+      return;
+    }
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     if (conteudo === process.env.CREDS_JSON) return;
-    const resGet   = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
-      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
+
+    // Busca variáveis atuais
+    const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
     });
+    if (!resGet.ok) {
+      const txt = await resGet.text();
+      console.error(`[sessão] Erro ao buscar env-vars (${resGet.status}):`, txt.slice(0, 200));
+      return;
+    }
     const envVars   = await resGet.json();
     const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
-    const novas     = [...existente.filter(v => v.key !== 'CREDS_JSON').map(v => ({ key: v.key, value: v.value })), { key: 'CREDS_JSON', value: conteudo }];
-    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+    const novas     = [
+      ...existente.filter(v => v.key !== 'CREDS_JSON').map(v => ({ key: v.key, value: v.value })),
+      { key: 'CREDS_JSON', value: conteudo },
+    ];
+
+    const resPut = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       method: 'PUT',
-      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify(novas),
     });
+    if (!resPut.ok) {
+      const txt = await resPut.text();
+      console.error(`[sessão] Erro ao salvar CREDS_JSON (${resPut.status}):`, txt.slice(0, 200));
+      return;
+    }
     console.log('[sessão] CREDS_JSON atualizado na Render API (será usado no próximo deploy).');
   } catch (e) { console.error('Erro ao salvar sessao na Render API:', e.message); }
 }
@@ -168,12 +189,10 @@ async function iniciarBot() {
       console.log(`Conexão fechada (código: ${statusCode}). Reconectando: ${!loggedOut}`);
 
       if (loggedOut) {
-        // Sessão inválida: limpa tudo e aguarda novo pairing
         console.log('[sessão] Sessão expirada/inválida. Limpando credenciais...');
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
-        // Reinicia o bot limpo para aguardar novo pairing
         setTimeout(iniciarBot, 3000);
       } else {
         tentativasReconexao++;
