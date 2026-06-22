@@ -272,7 +272,17 @@ let agendamentosIniciados=false;
 let horaConexao=null;
 let nomeGrupoConectado=null;
 
-// ─── BUG 3 FIX: restaurarSessao com normalização de escapes e log real ────────
+// ─── BUG 3 FIX: normalização robusta de escapes do CREDS_JSON ────────────────
+// O Render pode serializar variáveis de ambiente introduzindo escapes duplos.
+// Esta função normaliza TODOS os casos conhecidos antes de tentar JSON.parse().
+function normalizarCredsJson(raw) {
+  return raw
+    .replace(/\\\\n/g, '\\n')   // \\n  → \n
+    .replace(/\\\\t/g, '\\t')   // \\t  → \t
+    .replace(/\\\\r/g, '\\r')   // \\r  → \r
+    .replace(/\\\\\\\\/g, '\\\\'); // \\\\ → \\
+}
+
 function restaurarSessao() {
   try {
     let credsJson = process.env.CREDS_JSON;
@@ -280,18 +290,33 @@ function restaurarSessao() {
       console.log('[restaurarSessao] CREDS_JSON não definido — será necessário novo pairing.');
       return false;
     }
-    // Normaliza escapes duplos que o Render pode introduzir na variável de ambiente
-    credsJson = credsJson.replace(/\\\\n/g, '\\n');
-    // Valida que é um JSON legítimo antes de gravar no disco
+
+    console.log(`[restaurarSessao] CREDS_JSON recebido — tamanho: ${credsJson.length} chars.`);
+
+    // Tenta primeiro sem normalização (caso o Render já entregue correto)
+    let jsonValido = null;
     try {
       JSON.parse(credsJson);
-    } catch (parseErr) {
-      console.error('[restaurarSessao] CREDS_JSON inválido — JSON.parse falhou:', parseErr.message);
-      console.error('[restaurarSessao] Primeiros 120 chars do CREDS_JSON:', credsJson.slice(0, 120));
-      return false;
+      jsonValido = credsJson;
+      console.log('[restaurarSessao] CREDS_JSON válido sem normalização.');
+    } catch (_) {
+      // Tenta com normalização de escapes duplos
+      const normalizado = normalizarCredsJson(credsJson);
+      try {
+        JSON.parse(normalizado);
+        jsonValido = normalizado;
+        console.log('[restaurarSessao] CREDS_JSON válido após normalização de escapes.');
+      } catch (parseErr) {
+        console.error('[restaurarSessao] CREDS_JSON inválido mesmo após normalização.');
+        console.error('[restaurarSessao] Erro do JSON.parse:', parseErr.message);
+        console.error('[restaurarSessao] Primeiros 300 chars (raw)   :', credsJson.slice(0, 300));
+        console.error('[restaurarSessao] Primeiros 300 chars (norm)  :', normalizado.slice(0, 300));
+        return false;
+      }
     }
+
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-    fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
+    fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), jsonValido, 'utf8');
     console.log('[restaurarSessao] Sessão restaurada com sucesso do CREDS_JSON.');
     return true;
   } catch (e) {
@@ -873,15 +898,16 @@ async function gerarSaldoIndividual(nomeDigitado) {
 }
 
 // ─── HISTORICO INDIVIDUAL ─────────────────────────────────────────────────────
-async function gerarHistoricoCliente(nomeDigitado) {
+async function gerarHistoricoCliente(nomeDigitado, filtroMes) {
   try {
-    const{historico,saldos}=await carregarHistoricoAgrupado();
+    const{historico,saldos}=await carregarHistoricoAgrupado(filtroMes||null);
     const nomesConhecidos=Object.keys(historico);
     const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
     if(!nomeCanon||!historico[nomeCanon]) return `\u274c Nenhum hist\u00f3rico encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const movs=historico[nomeCanon];
     const saldoAtual=saldos[nomeCanon]||0;
-    let resposta=`*Hist\u00f3rico de ${nomeCanon}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
+    const labelMes = filtroMes ? ` — ${capitalizarNome(filtroMes)}` : '';
+    let resposta=`*Hist\u00f3rico de ${nomeCanon}${labelMes}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n`;
     let totalComprado=0, totalPago=0;
     for(const m of movs){
       if(m.tipo==='Compra'){
@@ -967,8 +993,8 @@ async function processarMensagem(sock, msg, jidGrupo) {
         '  Ex: _julia pagou 2 trufas_\n\n' +
         '*Ver saldo:* saldo nome\n' +
         '  Ex: _saldo julia_\n\n' +
-        '*Histórico:* historico nome\n' +
-        '  Ex: _historico julia_\n\n' +
+        '*Histórico:* historico nome [mes]\n' +
+        '  Ex: _historico julia_ ou _historico julia junho_\n\n' +
         '*Cancelar último:* cancelar nome\n' +
         '  Ex: _cancelar julia_\n\n' +
         '*Relatório geral:* relatorio\n' +
@@ -1028,9 +1054,18 @@ async function processarMensagem(sock, msg, jidGrupo) {
     }
 
     // ── HISTÓRICO: historico nome [mes] ───────────────────────────────────────
+    // Suporta: "historico julia", "historico julia junho", "historico julia 06"
     if ((partes[0] === 'historico' || partes[0] === 'hist') && partes.length >= 2) {
-      const nomeRaw = partes.slice(1).join(' ');
-      return responder(await gerarHistoricoCliente(nomeRaw));
+      const resto = partes.slice(1);
+      // Verifica se a última palavra é um mês válido
+      let filtroMes = null;
+      let nomeParts = resto;
+      if (resto.length >= 2 && isMes(resto[resto.length - 1])) {
+        filtroMes = resto[resto.length - 1];
+        nomeParts = resto.slice(0, -1);
+      }
+      const nomeRaw = nomeParts.join(' ');
+      return responder(await gerarHistoricoCliente(nomeRaw, filtroMes));
     }
 
     // ── CANCELAR: cancelar nome ───────────────────────────────────────────────
@@ -1085,16 +1120,13 @@ async function processarMensagem(sock, msg, jidGrupo) {
     }
 
     // ── COMPRA: nome qtd produto ──────────────────────────────────────────────
-    // Formato: [nome...] [qtd] [produto...] ou [nome...] [produto...] [qtd]
     if (partes.length >= 3) {
-      // Tenta encontrar um número e um produto na mensagem
       let qtdIdx = -1, qtd = null;
       for (let i = 0; i < partes.length; i++) {
         const n = toNumero(partes[i]);
         if (n) { qtdIdx = i; qtd = n; break; }
       }
       if (qtdIdx > 0 && qtd) {
-        // nome vem antes do número; produto vem depois
         const nomeDigitado = partes.slice(0, qtdIdx).join(' ');
         const prodStr = partes.slice(qtdIdx + 1).join(' ');
         const prod = toProduto(prodStr);
@@ -1121,10 +1153,7 @@ async function processarMensagem(sock, msg, jidGrupo) {
   }
 }
 
-// ─── BUG 2 FIX: conectarBot() com makeWASocket e printQRInTerminal: false ─────
-// Problema anterior: esta função estava completamente ausente do arquivo enviado
-// ao GitHub. sockGlobal permanecia null para sempre, e o endpoint /pair
-// retornava 503 eternamente.
+// ─── CONECTAR BOT ─────────────────────────────────────────────────────────────
 async function conectarBot() {
   try {
     restaurarSessao();
@@ -1138,7 +1167,7 @@ async function conectarBot() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
       },
-      printQRInTerminal: false,   // ← CRÍTICO: evita conflito com Pairing Code
+      printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       browser: Browsers.ubuntu('Chrome'),
       markOnlineOnConnect: false,
@@ -1154,20 +1183,19 @@ async function conectarBot() {
     });
 
     sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+      const { connection, lastDisconnect } = update;
 
       if (connection === 'open') {
         botConectado = true;
         horaConexao  = new Date();
         console.log('\u2705 Bot conectado ao WhatsApp!');
 
-        // Identifica o grupo alvo pelo nome
         if (!jidGrupoGlobal) {
           try {
             const grupos = await sock.groupFetchAllParticipating();
             for (const [jid, meta] of Object.entries(grupos)) {
               if (norm(meta.subject).includes(norm(GRUPO_NOME))) {
-                jidGrupoGlobal  = jid;
+                jidGrupoGlobal     = jid;
                 nomeGrupoConectado = meta.subject;
                 console.log(`\u2705 Grupo encontrado: ${meta.subject} (${jid})`);
                 break;
@@ -1181,8 +1209,8 @@ async function conectarBot() {
       }
 
       if (connection === 'close') {
-        botConectado  = false;
-        sockGlobal    = null;
+        botConectado = false;
+        sockGlobal   = null;
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
         console.log(`Conexão encerrada. Código: ${statusCode}`);
 
