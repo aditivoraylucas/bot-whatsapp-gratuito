@@ -3,11 +3,8 @@ process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?
 
 // ─── FIX: força fetch nativo do Node.js (undici) para googleapis ──────────────
 // Resolve "Premature close" ao renovar token OAuth no Render/Railway
-if (typeof globalThis.fetch === 'undefined') {
-  const { default: nodeFetch } = await import('node-fetch').catch(() => ({ default: undefined }));
-  if (nodeFetch) globalThis.fetch = nodeFetch;
-}
-// Garante que o google-auth-library use o fetch nativo (Node 18+)
+// IMPORTANTE: NÃO usar await import() no topo — usar require síncrono ou ignorar
+// O Node 18+ já tem fetch nativo; apenas garantimos que está definido.
 process.env.GOOGLE_SDK_NODE_LOGGING = 'none';
 
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
@@ -565,7 +562,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const rows=await sheet.getRows();
     const row=rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
     const cliente = row ? row.get('Cliente') : capitalizarNome(clienteEnviado);
-    if(!row) return{ok:false,msg:`❌ Nenhuma dívida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
+    if(!row) return {ok:false,msg:`❌ Nenhuma dívida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.`};
     const qtdAtual  = parseInt(row.get('Quantidade')||'0');
     const qtdPaga   = Math.min(quantidade,qtdAtual);
     const novaQtd   = qtdAtual-qtdPaga;
@@ -573,11 +570,11 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const pago = qtdAtual>0 ? (totalAtual/qtdAtual)*qtdPaga : 0;
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente:row.get('Cliente'),produto,quantidade:qtdPaga,valor:pago});
     await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:row.get('Cliente'),Tipo:'Pagamento',Produto:produto,Quantidade:qtdPaga,Valor:pago.toFixed(2)})), 4, 'addRow Pagamento Produto');
-    if(novaQtd===0){ await row.delete(); return{ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`}; }
+    if(novaQtd===0){ await row.delete(); return {ok:true,msg:`✅ *${row.get('Cliente')}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.`}; }
     const novoTotal=totalAtual-pago;
     row.set('Quantidade',novaQtd); row.set('Total',novoTotal.toFixed(2)); await row.save();
-    return{ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
+    return {ok:true,msg:`✅ *${row.get('Cliente')}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
+  } catch(err){console.error('Erro pag produto:',err.message);return {ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
@@ -590,13 +587,13 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       ? rows.filter(r=>r.get('Cliente')===nomeCanon)
       : rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
     const cliente=rowsCliente.length?rowsCliente[0].get('Cliente'):capitalizarNome(clienteEnviado);
-    if(!rowsCliente.length) return{ok:false,msg:`❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
+    if(!rowsCliente.length) return {ok:false,msg:`❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.`};
     const totalDevido=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
     if(jid) pushLancamento(jid,{tipo:'pagamento',cliente,produto:'geral',quantidade:'-',valor:valorPago});
     await comRetry(() => getSheetHistorico().then(sh => sh.addRow({Data:agora(),Cliente:cliente,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:valorPago.toFixed(2)})), 4, 'addRow Pagamento Valor');
     if(valorPago>=totalDevido){
       for(const r of rowsCliente) await r.delete();
-      return{ok:true,msg:`✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.`};
+      return {ok:true,msg:`✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.`};
     }
     let restante=valorPago;
     for(const r of rowsCliente){
@@ -611,13 +608,13 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
         await r.save(); restante=0;
       }
     }
-    return{ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return{ok:false,msg:'❌ Erro ao registrar pagamento.';};}
+    return {ok:true,msg:`✅ *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
+  } catch(err){console.error('Erro pag valor:',err.message);return {ok:false,msg:'❌ Erro ao registrar pagamento.';};}
 }
 
 async function gerarRelatorioGeral() {
   try {
-    const sheet=await getSheetSaldo();
+    const sheet=await comRetry(() => getSheetSaldo(), 4, 'gerarRelatorioGeral');
     const rows=await sheet.getRows();
     if(!rows.length) return 'Nenhuma dívida em aberto no momento.';
     const clientes={};
