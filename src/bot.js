@@ -1,32 +1,31 @@
 // ─── LÓGICA DO WHATSAPP / BAILEYS ────────────────────────────────────────────
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
 const fs   = require('fs');
 const path = require('path');
 const pino = require('pino');
 
 const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
-const { horaAtualSP, agoraData } = require('./utils');
+const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ──────────────────────────────────────────────────────
-let botConectado        = false;
-let sockGlobal          = null;
-let jidGrupoGlobal      = null;
+// ── Estado compartilhado ────────────────────────────────────────────
+let botConectado          = false;
+let sockGlobal            = null;
+let jidGrupoGlobal        = null;
 let agendamentosIniciados = false;
-let ultimoDiaLembrete   = '';
-let ultimoDiaResumo     = '';
-let pairingPendente     = false;
-let pairingNumero       = '';
+let ultimoDiaLembrete     = '';
+let ultimoDiaResumo       = '';
+let pairingPendente       = false;
+let pairingNumero         = '';
 
-function getBotConectado()           { return botConectado; }
-function getSockGlobal()             { return sockGlobal; }
-function getPairingNumero()          { return pairingNumero; }
-function setPairingPendente(v)       { pairingPendente = v; }
-function setPairingNumero(v)         { pairingNumero = v; }
+function getBotConectado()     { return botConectado; }
+function getSockGlobal()       { return sockGlobal; }
+function getPairingNumero()    { return pairingNumero; }
+function setPairingPendente(v) { pairingPendente = v; }
+function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Sessão persistente ────────────────────────────────────────────────────────
+// ── Sessão persistente ──────────────────────────────────────────────────
 function restaurarSessao() {
   try {
     const credsJson = process.env.CREDS_JSON;
@@ -48,9 +47,9 @@ async function salvarSessaoNoRender() {
     const resGet   = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
     });
-    const envVars  = await resGet.json();
+    const envVars   = await resGet.json();
     const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
-    const novas    = [...existente.filter(v => v.key !== 'CREDS_JSON').map(v => ({ key: v.key, value: v.value })), { key: 'CREDS_JSON', value: conteudo }];
+    const novas     = [...existente.filter(v => v.key !== 'CREDS_JSON').map(v => ({ key: v.key, value: v.value })), { key: 'CREDS_JSON', value: conteudo }];
     await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       method: 'PUT',
       headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
@@ -60,7 +59,7 @@ async function salvarSessaoNoRender() {
   } catch (e) { console.error('Erro ao salvar sessao:', e.message); }
 }
 
-// ── iniciarBot ────────────────────────────────────────────────────────────────
+// ── iniciarBot ──────────────────────────────────────────────────────────
 async function iniciarBot() {
   restaurarSessao();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -95,6 +94,75 @@ async function iniciarBot() {
       pairingPendente = false;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
+
       if (!agendamentosIniciados) {
         agendamentosIniciados = true;
-        setInter
+        setInterval(async () => {
+          try {
+            const horaNum = horaAtualSP();
+            const hoje    = agoraData();
+            if (horaNum === HORA_LEMBRETE && ultimoDiaLembrete !== hoje && jidGrupoGlobal) {
+              ultimoDiaLembrete = hoje;
+              await verificarLembretes(sock, jidGrupoGlobal);
+            }
+            if (horaNum === HORA_RESUMO && ultimoDiaResumo !== hoje && jidGrupoGlobal) {
+              ultimoDiaResumo = hoje;
+              await sock.sendMessage(jidGrupoGlobal, { text: await gerarResumoDiario() });
+            }
+          } catch (e) { console.error('Erro agendamento:', e.message); }
+        }, 60 * 60 * 1000);
+      }
+    }
+
+    if (connection === 'close') {
+      botConectado          = false;
+      agendamentosIniciados = false;
+      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Conexão fechada. Reconectando:', shouldReconnect);
+      if (shouldReconnect) setTimeout(iniciarBot, 5000);
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      try {
+        if (msg.key.fromMe) continue;
+        const jid     = msg.key.remoteJid || '';
+        const isGroup = jid.endsWith('@g.us');
+        if (!isGroup) continue;
+
+        const groupMeta = await sock.groupMetadata(jid).catch(() => null);
+        const nomeGrupo = groupMeta?.subject || '';
+        if (!norm(nomeGrupo).includes(norm(GRUPO_NOME))) continue;
+        jidGrupoGlobal = jid;
+
+        // ── Áudio ──
+        const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+        if (audioMsg) {
+          try {
+            const buffer   = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
+            const textoRaw = await transcreverAudio(buffer, mimeType);
+            if (textoRaw) {
+              const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
+              console.log('Transcrição:', textoRaw);
+              const resposta = await processarTexto(textoTranscrito, jid, sock);
+              if (resposta) await sock.sendMessage(jid, { text: `🎤 _"${textoRaw}"_\n\n${resposta}` });
+            }
+          } catch (e) { console.error('Erro ao processar áudio:', e.message); }
+          continue;
+        }
+
+        // ── Texto ──
+        const textMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+        if (!textMsg.trim()) continue;
+        const resposta = await processarTexto(textMsg, jid, sock);
+        if (resposta) await sock.sendMessage(jid, { text: resposta });
+
+      } catch (e) { console.error('Erro ao processar mensagem:', e.message); }
+    }
+  });
+}
+
+module.exports = { iniciarBot, getBotConectado, getSockGlobal, getPairingNumero, setPairingPendente, setPairingNumero };
