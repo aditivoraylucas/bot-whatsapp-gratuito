@@ -8,7 +8,6 @@ const path = require('path');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const http = require('http');
-const qrcode = require('qrcode');
 const pino = require('pino');
 const FormData = require('form-data');
 
@@ -264,7 +263,9 @@ function nomeProdutoExib(produto) {
 }
 
 let botConectado=false;
-let qrCodeData=null;
+// ─── ESTADO DO PAIRING CODE ───────────────────────────────────────────────────
+let pairingCodeGerado=null;   // código de 8 dígitos retornado pelo Baileys
+let pairingAguardando=false;  // true enquanto espera o usuário digitar o número
 let sockGlobal=null;
 let jidGrupoGlobal=null;
 let agendamentosIniciados=false;
@@ -326,36 +327,174 @@ async function limparCREDSnoRender() {
       headers:{'Authorization':`Bearer ${RENDER_API_KEY}`,'Content-Type':'application/json'},
       body:JSON.stringify(novas)
     });
-    console.log('CREDS_JSON removido do Render — proximo inicio vai pedir novo QR Code.');
+    console.log('CREDS_JSON removido do Render — proximo inicio vai pedir novo codigo de emparelhamento.');
   } catch(e){console.error('Erro ao limpar CREDS no Render:',e.message);}
 }
 
-http.createServer(async(req,res)=>{
+// ─── SERVIDOR HTTP (frontend de pairing code) ─────────────────────────────────
+const server = http.createServer(async (req, res) => {
   try {
-    res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
-    if(botConectado){
+    // POST /pair  →  recebe { number: "5511999999999" } e solicita o código
+    if (req.method === 'POST' && req.url === '/pair') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', async () => {
+        try {
+          const { number } = JSON.parse(body);
+          // Valida e normaliza: remove tudo que não for dígito
+          const clean = (number || '').replace(/\D/g, '');
+          if (!clean || clean.length < 10 || clean.length > 15) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Número inválido. Use formato E.164 sem o +, ex: 5511999999999' }));
+          }
+          if (!sockGlobal) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Bot ainda não inicializado. Aguarde alguns segundos.' }));
+          }
+          console.log(`Solicitando Pairing Code para o número: ${clean}`);
+          const code = await sockGlobal.requestPairingCode(clean);
+          pairingCodeGerado = code;
+          console.log(`Pairing Code gerado: ${code}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code }));
+        } catch (e) {
+          console.error('Erro ao gerar pairing code:', e.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+
+    if (botConectado) {
       const grupoExib = nomeGrupoConectado || GRUPO_NOME;
-      const horaExib = horaConexao ? horaConexao.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}) : '';
-      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:50px;background:#f0faf0">
-        <h1 style="color:#25D366">\u2705 Bot conectado!</h1>
+      const horaExib = horaConexao ? horaConexao.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '';
+      res.end(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Bot conectado</title>
+        <style>body{font-family:sans-serif;text-align:center;padding:50px;background:#f0faf0}</style>
+      </head><body>
+        <h1 style="color:#25D366">&#x2705; Bot conectado!</h1>
         <p style="font-size:18px">Monitorando grupo: <strong>${grupoExib}</strong></p>
-        ${horaExib?`<p style="color:#888;font-size:14px">Conectado desde: ${horaExib}</p>`:''}
-        <p style="color:#555;margin-top:20px">Funcionando normalmente. \ud83d\ude80</p>
+        ${horaExib ? `<p style="color:#888;font-size:14px">Conectado desde: ${horaExib}</p>` : ''}
+        <p style="color:#555;margin-top:20px">Funcionando normalmente. &#x1F680;</p>
         <script>setTimeout(()=>location.reload(),60000)</script>
       </body></html>`);
-    } else if(qrCodeData){
-      const qrImage=await qrcode.toDataURL(qrCodeData).catch(()=>null);
-      res.end(`<html><body style="font-family:sans-serif;text-align:center;padding:30px">
-        <h1>\ud83d\udcf1 Escanear QR Code</h1>
-        <p>WhatsApp \u2192 Configura\u00e7\u00f5es \u2192 Aparelhos conectados \u2192 Conectar aparelho</p>
-        ${qrImage?`<img src="${qrImage}" style="width:300px;height:300px;border:4px solid #25D366;border-radius:10px" />`:'<p>Gerando QR...</p>'}
-        <script>setTimeout(()=>location.reload(),25000)</script>
-      </body></html>`);
     } else {
-      res.end('<html><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>\u23f3 Iniciando bot...</h1><script>setTimeout(()=>location.reload(),5000)</script></body></html>');
+      // ── Tela de Pairing Code ──────────────────────────────────────────────
+      res.end(`<!DOCTYPE html><html lang="pt-BR"><head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Conectar WhatsApp</title>
+        <style>
+          *{box-sizing:border-box}
+          body{font-family:sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+          .card{background:#fff;border-radius:12px;padding:40px 32px;max-width:420px;width:90%;box-shadow:0 4px 20px rgba(0,0,0,.1);text-align:center}
+          h1{color:#128C7E;margin-bottom:8px;font-size:1.4rem}
+          p.sub{color:#555;font-size:.9rem;margin-bottom:24px}
+          input{width:100%;padding:12px 14px;border:1px solid #ccc;border-radius:8px;font-size:1rem;margin-bottom:14px;outline:none;transition:border .2s}
+          input:focus{border-color:#128C7E}
+          button{width:100%;padding:13px;background:#25D366;color:#fff;border:none;border-radius:8px;font-size:1rem;cursor:pointer;font-weight:600;transition:background .2s}
+          button:hover{background:#128C7E}
+          button:disabled{background:#aaa;cursor:not-allowed}
+          .code-box{margin-top:24px;background:#f0faf0;border:2px solid #25D366;border-radius:10px;padding:18px}
+          .code-box span{font-size:2rem;font-weight:700;letter-spacing:6px;color:#128C7E}
+          .code-box p{margin:8px 0 0;font-size:.85rem;color:#555}
+          .error{color:#c0392b;margin-top:10px;font-size:.9rem}
+          .steps{text-align:left;margin-top:20px;font-size:.85rem;color:#444;line-height:1.8}
+          .steps b{color:#128C7E}
+        </style>
+      </head><body>
+        <div class="card">
+          <h1>&#x1F4F1; Conectar WhatsApp</h1>
+          <p class="sub">Insira o número do WhatsApp que será vinculado ao bot (com código do país, sem espaços ou traços).</p>
+
+          <input id="num" type="tel" placeholder="Ex: 5511999999999" maxlength="15" autocomplete="off">
+          <button id="btn" onclick="solicitar()">Gerar código de emparelhamento</button>
+          <div id="error" class="error"></div>
+
+          <div id="result" style="display:none" class="code-box">
+            <p style="margin:0 0 8px;font-size:.9rem;font-weight:600;color:#333">Seu código:</p>
+            <span id="code"></span>
+            <p>Abra o WhatsApp &rarr; <b>Configurações</b> &rarr; <b>Aparelhos conectados</b> &rarr; <b>Conectar um aparelho</b> &rarr; <b>Conectar com número de telefone</b> e insira o código acima.</p>
+          </div>
+
+          <div class="steps">
+            <b>Passo a passo:</b><br>
+            1. Digite o número com DDI (55 para Brasil) + DDD + número<br>
+            2. Clique em <b>Gerar código</b><br>
+            3. No WhatsApp: Configurações &rarr; Aparelhos conectados &rarr; Conectar com número de telefone<br>
+            4. Digite o código de 8 dígitos exibido acima
+          </div>
+        </div>
+
+        <script>
+          const input = document.getElementById('num');
+          // Permite apenas dígitos no input
+          input.addEventListener('input', () => {
+            input.value = input.value.replace(/\\D/g, '');
+          });
+
+          async function solicitar() {
+            const btn = document.getElementById('btn');
+            const errEl = document.getElementById('error');
+            const result = document.getElementById('result');
+            const codeEl = document.getElementById('code');
+            errEl.textContent = '';
+            result.style.display = 'none';
+
+            const number = input.value.replace(/\\D/g, '');
+            if (!number || number.length < 10 || number.length > 15) {
+              errEl.textContent = 'Número inválido. Use DDI + DDD + número (ex: 5511999999999).';
+              return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Aguardando...';
+            try {
+              const resp = await fetch('/pair', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ number })
+              });
+              const data = await resp.json();
+              if (!resp.ok || data.error) {
+                errEl.textContent = data.error || 'Erro ao gerar código.';
+                btn.disabled = false;
+                btn.textContent = 'Gerar código de emparelhamento';
+                return;
+              }
+              // Formata o código como XXXX-XXXX
+              const raw = (data.code || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+              codeEl.textContent = raw.length === 8 ? raw.slice(0,4) + '-' + raw.slice(4) : raw;
+              result.style.display = 'block';
+              btn.textContent = 'Código gerado! Aguardando vinculação...';
+            } catch (e) {
+              errEl.textContent = 'Erro de conexão com o servidor.';
+              btn.disabled = false;
+              btn.textContent = 'Gerar código de emparelhamento';
+            }
+          }
+
+          // Recarrega automaticamente quando o bot conectar
+          setInterval(async () => {
+            try {
+              const r = await fetch('/');
+              const html = await r.text();
+              if (html.includes('Bot conectado')) location.reload();
+            } catch(_) {}
+          }, 8000);
+        </script>
+      </body></html>`);
     }
-  } catch(e){res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');}
-}).listen(PORT,()=>console.log(`\u2705 Servidor rodando na porta ${PORT}`));
+  } catch (e) {
+    res.end('<html><body><h1>Carregando...</h1><script>setTimeout(()=>location.reload(),3000)</script></body></html>');
+  }
+});
+
+server.listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
 // ─── CACHE DO JWT (evita criar novo cliente a cada chamada) ───────────────────
 let _jwtCache = null;
@@ -777,488 +916,4 @@ async function gerarHistoricoCliente(nomeDigitado) {
       ?`*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`
       :'\u2705 *Conta quitada!*';
     return resposta;
-  } catch(err){console.error('Erro historico:',err.message);return '\u274c Erro ao buscar hist\u00f3rico.';}
-}
-
-// ─── RELATORIO DO MES ─────────────────────────────────────────────────────────
-async function gerarRelatorioMes(mes) {
-  try {
-    const{historico}=await carregarHistoricoAgrupado(mes);
-    const nomesMes=['','Janeiro','Fevereiro','Mar\u00e7o','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-    const mesNum=parseInt(norm(mes));
-    const nomeMesExib=isNaN(mesNum)?capitalizarNome(mes):(nomesMes[mesNum]||capitalizarNome(mes));
-    const todosNomes=Object.keys(historico);
-    if(!todosNomes.length) return `Nenhuma movimenta\u00e7\u00e3o registrada em ${nomeMesExib}.`;
-    let totalVendas=0, totalRecebido=0, qtdTrufa=0, qtdBolo=0;
-    let detalhe='';
-    for(const nome of todosNomes.sort()){
-      const movs=historico[nome];
-      const comprado=movs.filter(m=>m.tipo==='Compra').reduce((s,m)=>s+m.valor,0);
-      const pago=movs.filter(m=>m.tipo==='Pagamento').reduce((s,m)=>s+m.valor,0);
-      qtdTrufa+=movs.filter(m=>m.tipo==='Compra'&&m.produto==='trufa').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
-      qtdBolo +=movs.filter(m=>m.tipo==='Compra'&&m.produto==='bolo').reduce((s,m)=>s+parseInt(m.qtd||'0'),0);
-      totalVendas+=comprado; totalRecebido+=pago;
-      detalhe+=`\n*${nome}*: comprou R$ ${comprado.toFixed(2)} | pagou R$ ${pago.toFixed(2)}\n`;
-    }
-    return `*Relat\u00f3rio de ${nomeMesExib}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n${detalhe}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} unid. | Bolos: ${qtdBolo} unid.\nTotal em vendas: R$ ${totalVendas.toFixed(2)}\nTotal recebido: R$ ${totalRecebido.toFixed(2)}\nA receber: R$ ${(totalVendas-totalRecebido).toFixed(2)}`;
-  } catch(err){console.error('Erro relatorio mes:',err.message);return '\u274c Erro ao gerar relat\u00f3rio do m\u00eas.';}
-}
-
-// ─── RESUMO DIARIO ────────────────────────────────────────────────────────────
-async function gerarResumoDiario() {
-  try {
-    const hoje=agoraData();
-    const{historico}=await carregarHistoricoAgrupado();
-    let totalVendas=0,totalPago=0,qtdTrufa=0,qtdBolo=0,clientes=new Set();
-    for(const [nome,movs] of Object.entries(historico)){
-      for(const m of movs){
-        const dataMovStr=soData(m.data);
-        if(dataMovStr!==hoje) continue;
-        if(m.tipo==='Compra'){
-          totalVendas+=m.valor;
-          if(m.produto==='trufa') qtdTrufa+=parseInt(m.qtd||'0');
-          if(m.produto==='bolo')  qtdBolo +=parseInt(m.qtd||'0');
-          clientes.add(nome);
-        } else if(m.tipo==='Pagamento'){
-          totalPago+=m.valor;
-        }
-      }
-    }
-    const sheetSaldo=await getSheetSaldo();
-    const rows=await sheetSaldo.getRows();
-    const totalAberto=rows.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    return `*Resumo do Dia - ${hoje}*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientes.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
-  } catch(err){console.error('Erro resumo:',err.message);return '\u274c Erro ao gerar resumo.';}
-}
-
-// ─── LEMBRETE DE COBRANCA ─────────────────────────────────────────────────────
-const DIAS_LEMBRETE = parseInt(process.env.DIAS_LEMBRETE||'7');
-const HORA_LEMBRETE = parseInt(process.env.HORA_LEMBRETE||'20');
-const HORA_RESUMO   = parseInt(process.env.HORA_RESUMO  ||'20');
-
-async function verificarLembretes(sock, jid) {
-  try {
-    const sheet=await getSheetSaldo();
-    const rows=await sheet.getRows();
-    const agora2=new Date();
-    const clientes={};
-    for(const row of rows){
-      const nome=(row.get('Cliente')||'').trim();
-      const total=parseFloat(row.get('Total')||'0');
-      const ultima=(row.get('UltimaCompra')||'').trim();
-      if(!nome||total<=0||!ultima) continue;
-      const partes=ultima.split(' ')[0].split('/');
-      if(partes.length<3) continue;
-      const dataUltima=new Date(`${partes[2]}-${partes[1]}-${partes[0]}`);
-      const diasPassados=Math.floor((agora2-dataUltima)/(1000*60*60*24));
-      if(diasPassados>=DIAS_LEMBRETE){
-        if(!clientes[nome]) clientes[nome]={total:0,dias:diasPassados};
-        clientes[nome].total+=total;
-        clientes[nome].dias=Math.max(clientes[nome].dias,diasPassados);
-      }
-    }
-    const nomes=Object.keys(clientes);
-    if(!nomes.length) return;
-    for(const [nome,dados] of Object.entries(clientes)){
-      const msg=`\u26a0\ufe0f *Lembrete de cobran\u00e7a*\n*${nome}* est\u00e1 com R$ ${dados.total.toFixed(2)} em aberto h\u00e1 *${dados.dias} dias*.`;
-      await sock.sendMessage(jid,{text:msg});
-    }
-  } catch(e){console.error('Erro lembrete:',e.message);}
-}
-
-// ─── MUDAR PRECO ──────────────────────────────────────────────────────────────
-function mudarPreco(produto, novoPreco) {
-  const p=toProduto(produto);
-  if(!p) return `\u274c Produto *${produto}* n\u00e3o encontrado.`;
-  const precoAntigo=PRECOS[p]||0;
-  PRECOS[p]=novoPreco;
-  salvarPrecos();
-  return `\u2705 Pre\u00e7o de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} \u2192 R$ ${novoPreco.toFixed(2)}\n_Saldos existentes n\u00e3o foram alterados. Vale para novas compras._`;
-}
-
-// ─── NOVO PRODUTO ─────────────────────────────────────────────────────────────
-function cadastrarNovoProduto(nomeProduto, preco) {
-  const key=norm(nomeProduto).replace(/\s+/g,'_');
-  if(PRECOS[key]!==undefined) return `\u26a0\ufe0f Produto *${nomeProduto}* j\u00e1 existe. Para mudar o pre\u00e7o: _preco ${nomeProduto} R$XX_`;
-  PRECOS[key]=preco;
-  SINONIMOS_EXTRA[key]=[norm(nomeProduto), nomeProduto.toLowerCase().trim()];
-  SINONIMOS_EXTRA[key]=[...new Set(SINONIMOS_EXTRA[key])];
-  salvarPrecos();
-  salvarSinonimosExtra();
-  return `\u2705 Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;
-}
-
-// ─── LISTAR PRODUTOS ──────────────────────────────────────────────────────────
-function listarProdutos() {
-  const todos=todosOsSinonimos();
-  let msg='*Produtos cadastrados*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n';
-  for(const [key] of Object.entries(todos)){
-    const preco=PRECOS[key];
-    if(preco===undefined) continue;
-    msg+=`${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;
-  }
-  msg+='\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_Para mudar o pre\u00e7o: preco [produto] [valor]_';
-  return msg;
-}
-
-// ─── ZERAR CLIENTE ────────────────────────────────────────────────────────────
-async function zerarCliente(nomeDigitado) {
-  try {
-    const sheet=await getSheetSaldo();
-    const rows=await sheet.getRows();
-    const nomesConhecidos=[...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
-    const nomeCanon=resolverNome(nomeDigitado,nomesConhecidos);
-    if(!nomeCanon) return `\u274c Cliente *${capitalizarNome(nomeDigitado)}* n\u00e3o encontrado.`;
-    const rowsCliente=rows.filter(r=>r.get('Cliente')===nomeCanon);
-    if(!rowsCliente.length) return `\u2705 *${nomeCanon}* j\u00e1 est\u00e1 sem d\u00edvidas.`;
-    const totalZerado=rowsCliente.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-    for(const r of rowsCliente) await r.delete();
-    await (await getSheetHistorico()).addRow({Data:agora(),Cliente:nomeCanon,Tipo:'Pagamento',Produto:'geral',Quantidade:'-',Valor:totalZerado.toFixed(2)});
-    return `\u2705 D\u00edvida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
-  } catch(err){console.error('Erro zerar:',err.message);return '\u274c Erro ao zerar cliente.';}
-}
-
-// ─── PARSER DE LINHA (COMPRAS) ────────────────────────────────────────────────
-const PALAVRAS_RESERVADAS = new Set([
-  'pagou','pix','transferiu','depositou','mandou','enviou',
-  'cancelar','saldo','historico','relatorio','resumo',
-  'cobrar','lembrete','lembretes','preco','produtos','zerar','novo'
-]);
-
-function parsearLinha(linha) {
-  const limpa=linha
-    .replace(/[.!?,;:]+(\s|$)/g, '$1')
-    .replace(/,/g,' ')
-    .replace(/\b(mais|e|de)\b/gi,' ')
-    .replace(/\+/g,' ')
-    .replace(/\s+/g,' ')
-    .trim();
-  const palavrasOrig=limpa.split(' ').filter(Boolean);
-  const palavrasNorm=palavrasOrig.map(norm);
-  const n=palavrasNorm.length;
-  let inicioItens=-1;
-  for(let i=0;i<n;i++){
-    const p1=toProduto(palavrasNorm[i]);
-    if(p1){inicioItens=i;break;}
-    const qtd=toNumero(palavrasNorm[i]);
-    if(qtd!==null&&i+1<n){
-      const ok2=i+2<n&&toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]);
-      const ok1=toProduto(palavrasNorm[i+1]);
-      if(ok2||ok1){inicioItens=i;break;}
-    }
-  }
-  if(inicioItens<1) return null;
-  const nomeRaw=palavrasOrig.slice(0,inicioItens).join(' ').trim();
-  if(!nomeRaw) return null;
-  if(PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
-  const itens=[];
-  let i=inicioItens;
-  while(i<n){
-    const qtd=toNumero(palavrasNorm[i]);
-    if(qtd!==null&&i+1<n){
-      if(i+2<n){const p2=toProduto(palavrasNorm[i+1]+' '+palavrasNorm[i+2]);if(p2){itens.push({quantidade:qtd,produto:p2});i+=3;continue;}}
-      const p1=toProduto(palavrasNorm[i+1]);if(p1){itens.push({quantidade:qtd,produto:p1});i+=2;continue;}
-    }
-    if(i+1<n){const p2=toProduto(palavrasNorm[i]+' '+palavrasNorm[i+1]);if(p2){itens.push({quantidade:1,produto:p2});i+=2;continue;}}
-    const p1=toProduto(palavrasNorm[i]);if(p1){itens.push({quantidade:1,produto:p1});i+=1;continue;}
-    i++;
-  }
-  if(!itens.length) return null;
-  return{nome:capitalizarNome(nomeRaw),itens};
-}
-
-// ─── PARSEAR PAGAMENTO ────────────────────────────────────────────────────────
-function parsearPagamento(linha) {
-  const tNorm = norm(linha);
-  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
-  const kwMatch = tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);
-  if (!kwMatch) return null;
-  const keyword = kwMatch[1];
-  const palavrasNorm = tNorm.split(/\s+/).filter(Boolean);
-  const palavrasOrig = linha.trim().split(/\s+/).filter(Boolean);
-  let kwIdx = -1;
-  for(let i=0;i<palavrasNorm.length;i++){
-    if(palavrasNorm[i]===keyword){ kwIdx=i; break; }
-  }
-  if(kwIdx<=0) return null;
-  const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
-  if(!nomeRaw) return null;
-  const nome = capitalizarNome(nomeRaw);
-  const restoNorm = palavrasNorm.slice(kwIdx+1).join(' ').trim();
-  const restoOrig = palavrasOrig.slice(kwIdx+1).join(' ').trim();
-  const palavrasResto = restoNorm
-    .replace(/\bde\b/g, ' ')
-    .replace(/\bpix\b/g, ' ')
-    .replace(/\breais\b/g, ' ')
-    .replace(/\br\$\s*/g, ' ')
-    .split(/\s+/).filter(Boolean);
-  for (let i = 0; i < palavrasResto.length; i++) {
-    const qtd = toNumero(palavrasResto[i]);
-    if (qtd === null) continue;
-    if (i + 2 < palavrasResto.length) {
-      const p2 = toProduto(palavrasResto[i+1] + ' ' + palavrasResto[i+2]);
-      if (p2) return { tipo: 'produto', nome, qtd, produto: p2 };
-    }
-    if (i + 1 < palavrasResto.length) {
-      const p1 = toProduto(palavrasResto[i+1]);
-      if (p1) return { tipo: 'produto', nome, qtd, produto: p1 };
-    }
-  }
-  for (let i = 0; i < palavrasResto.length; i++) {
-    if (i + 1 < palavrasResto.length) {
-      const p2 = toProduto(palavrasResto[i] + ' ' + palavrasResto[i+1]);
-      if (p2) return { tipo: 'produto', nome, qtd: 1, produto: p2 };
-    }
-    const p1 = toProduto(palavrasResto[i]);
-    if (p1) return { tipo: 'produto', nome, qtd: 1, produto: p1 };
-  }
-  const valor = extrairValor(restoOrig);
-  if (valor !== null && valor > 0) return { tipo: 'valor', nome, valor };
-  return null;
-}
-
-// ─── DETECTA COMANDO ──────────────────────────────────────────────────────────
-function detectarComando(texto) {
-  const t=norm(texto);
-
-  if(t.includes('compras quitadas')||t==='quitadas') return{tipo:'quitadas'};
-  if(t.includes('relatorio detalhado')||t.includes('relat\u00f3rio detalhado')) return{tipo:'detalhado'};
-  if(t==='relatorio'||t==='relatorio geral'||t==='relat\u00f3rio'||t==='relat\u00f3rio geral') return{tipo:'geral'};
-  if(t==='resumo'||t==='resumo do dia'||t==='resumo diario') return{tipo:'resumo'};
-  if(t==='produtos'||t==='lista produtos'||t==='listar produtos') return{tipo:'produtos'};
-  if(t==='ajuda'||t==='!ajuda'||t==='help') return{tipo:'ajuda'};
-
-  const mRelArg=texto.match(/^relat[oó]rio\s+(.+)$/i);
-  if(mRelArg){
-    const arg=mRelArg[1].trim();
-    if(isMes(arg)) return{tipo:'mes',mes:arg};
-    return{tipo:'individual',nome:arg};
-  }
-
-  const mSaldo=texto.match(/^saldo\s+(.+)$/i);
-  if(mSaldo) return{tipo:'individual',nome:mSaldo[1].trim()};
-
-  const mHist=texto.match(/^historico\s+(.+)$/i)||texto.match(/^hist[oó]rico\s+(.+)$/i);
-  if(mHist) return{tipo:'historico',nome:mHist[1].trim()};
-
-  const mCancel=texto.match(/^cancelar\s+(.+)$/i);
-  if(mCancel) return{tipo:'cancelar',nome:mCancel[1].trim()};
-
-  const mZerar=texto.match(/^zerar\s+(.+)$/i);
-  if(mZerar) return{tipo:'zerar',nome:mZerar[1].trim()};
-
-  const mPreco=texto.match(/^pre[cç]o\s+(\S+)\s+(.+)$/i);
-  if(mPreco){
-    const val=extrairValor(mPreco[2]);
-    if(val&&val>0) return{tipo:'mudarpreco',produto:mPreco[1].trim(),valor:val};
-  }
-
-  const mNovoProd=texto.match(/^novo\s+produto[:\s]+([a-zà-ü\s]+?)\s+(R?\$?\s*[\d]+[,.]?[\d]*)\s*(reais)?$/i);
-  if(mNovoProd){
-    const val=extrairValor(mNovoProd[2]);
-    if(val&&val>0) return{tipo:'novoproduto',nome:mNovoProd[1].trim(),valor:val};
-  }
-
-  if(t==='cobrar'||t==='lembrete'||t==='lembretes') return{tipo:'lembrete'};
-
-  return{tipo:null};
-}
-
-// ─── AJUDA ────────────────────────────────────────────────────────────────────
-function gerarAjuda() {
-  return `\ud83e\udd16 *Comandos do Bot*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\ud83d\uded2 *Registrar compra:*\n_julia 3 trufas_\n_ana 2 bolos e 1 trufa_\n\n\ud83d\udcb3 *Registrar pagamento:*\n_julia pagou 10_\n_julia pix 10_\n_julia pix de 10_\n_julia pagou R$10_\n_julia pagou 10 reais_\n_julia pagou 2 trufas_\n_julia transferiu 15_\n_julia mandou 20 reais_\n\n\ud83d\udcca *Relat\u00f3rios:*\n_relatorio_ \u2014 d\u00edvidas em aberto\n_relatorio detalhado_ \u2014 com hist\u00f3rico\n_relatorio julia_ \u2014 saldo de um cliente\n_relatorio junho_ \u2014 relat\u00f3rio do m\u00eas\n_compras quitadas_ \u2014 clientes quitados\n_historico julia_ \u2014 hist\u00f3rico completo\n_resumo_ \u2014 resumo do dia\n\n\ud83d\udee0 *Administrar:*\n_produtos_ \u2014 lista produtos e pre\u00e7os\n_preco trufa 6_ \u2014 muda pre\u00e7o\n_novo produto brownie 8_ \u2014 novo produto\n_cancelar julia_ \u2014 cancela \u00faltimo lan\u00e7amento\n_zerar julia_ \u2014 zera d\u00edvida de um cliente\n_lembrete_ \u2014 envia cobran\u00e7as manualmente\n\n\ud83c\udfa4 *\u00c1udio:*\n_Envie um \u00e1udio no grupo e o bot transcreve automaticamente!_`;
-}
-
-// ─── AGENDAMENTOS ─────────────────────────────────────────────────────────────
-function agendarTarefas(sock, jid) {
-  if(agendamentosIniciados) return;
-  agendamentosIniciados=true;
-  console.log('Agendamentos iniciados.');
-  setInterval(async()=>{
-    try {
-      const now=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Sao_Paulo'}));
-      const hora=now.getHours();
-      const min=now.getMinutes();
-      if(min>=0&&min<5){
-        if(hora===HORA_RESUMO){
-          const resumo=await gerarResumoDiario();
-          await sock.sendMessage(jid,{text:resumo});
-        }
-        if(hora===HORA_LEMBRETE){
-          await verificarLembretes(sock,jid);
-        }
-      }
-    } catch(e){console.error('Erro agendamento:',e.message);}
-  },60*60*1000);
-}
-
-// ─── FLAG DE RECONEXÃO ────────────────────────────────────────────────────────
-let reconectando = false;
-
-async function processarTexto(texto, jid, sock) {
-  const cmd=detectarComando(texto);
-  if(cmd.tipo==='quitadas') return await gerarRelatorioQuitados();
-  if(cmd.tipo==='detalhado') return await gerarRelatorioDetalhado();
-  if(cmd.tipo==='geral') return await gerarRelatorioGeral();
-  if(cmd.tipo==='resumo') return await gerarResumoDiario();
-  if(cmd.tipo==='mes') return await gerarRelatorioMes(cmd.mes);
-  if(cmd.tipo==='individual') return await gerarSaldoIndividual(cmd.nome);
-  if(cmd.tipo==='historico') return await gerarHistoricoCliente(cmd.nome);
-  if(cmd.tipo==='cancelar') return await cancelarLancamento(jid,cmd.nome);
-  if(cmd.tipo==='zerar') return await zerarCliente(cmd.nome);
-  if(cmd.tipo==='produtos') return listarProdutos();
-  if(cmd.tipo==='ajuda') return gerarAjuda();
-  if(cmd.tipo==='lembrete'){ await verificarLembretes(sock,jid); return null; }
-  if(cmd.tipo==='mudarpreco') return mudarPreco(cmd.produto,cmd.valor);
-  if(cmd.tipo==='novoproduto') return cadastrarNovoProduto(cmd.nome,cmd.valor);
-
-  const linhas=texto.split('\n').map(l=>l.trim()).filter(Boolean);
-  const respostas=[];
-  for(const linha of linhas){
-    const pagamento=parsearPagamento(linha);
-    if(pagamento){
-      let result;
-      if(pagamento.tipo==='valor'){
-        result=await processarPagamentoValor(pagamento.nome,pagamento.valor,jid);
-      } else {
-        result=await processarPagamentoProduto(pagamento.nome,pagamento.qtd,pagamento.produto,jid);
-      }
-      respostas.push(result.msg);
-      continue;
-    }
-    const parsed=parsearLinha(linha);
-    if(!parsed) continue;
-    const linhasResposta=[];
-    for(const item of parsed.itens){
-      const resultado=await registrarOuAcumular(parsed.nome,item.produto,item.quantidade);
-      if(!resultado){
-        linhasResposta.push(`\u274c Erro ao registrar ${nomeProdutoExib(item.produto)}.`);
-      } else if(resultado.limiteBloqueado){
-        linhasResposta.push(`\u26a0\ufe0f *${resultado.cliente}* atingiu o limite de cr\u00e9dito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}! (atual: R$ ${resultado.totalAtual.toFixed(2)})`);
-      } else {
-        pushLancamento(jid,{tipo:'compra',cliente:resultado.cliente,produto:item.produto,quantidade:item.quantidade,valor:(PRECOS[item.produto]||0)*item.quantidade});
-        const nomeProd=nomeProdutoExib(item.produto);
-        linhasResposta.push(`${nomeProd}: +${item.quantidade} | Total: ${resultado.qtdAcumulada} unid. = R$ ${resultado.totalAcumulado.toFixed(2)}`);
-      }
-    }
-    if(linhasResposta.length) respostas.push(`*${parsed.nome}*\n${linhasResposta.join('\n')}`);
-  }
-  return respostas.length ? respostas.join('\n\n') : null;
-}
-
-async function conectarBot() {
-  restaurarSessao();
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
-  const sock = makeWASocket({
-    version,
-    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
-    browser: Browsers.ubuntu('Chrome'),
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    syncFullHistory: false,
-  });
-  sockGlobal = sock;
-
-  sock.ev.on('creds.update', async () => {
-    await saveCreds();
-    await salvarSessaoNoRender();
-  });
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      qrCodeData = qr;
-      botConectado = false;
-      console.log('QR Code gerado.');
-    }
-    if (connection === 'open') {
-      botConectado = true;
-      qrCodeData = null;
-      horaConexao = new Date();
-      reconectando = false;
-      console.log('\u2705 Bot conectado ao WhatsApp!');
-      await salvarSessaoNoRender();
-      const grupos = await sock.groupFetchAllParticipating();
-      const gruposArr = Object.values(grupos);
-      const grupoAlvo = gruposArr.find(g => norm(g.subject).includes(norm(GRUPO_NOME)));
-      if (grupoAlvo) {
-        jidGrupoGlobal = grupoAlvo.id;
-        nomeGrupoConectado = grupoAlvo.subject;
-        console.log(`Grupo encontrado: ${grupoAlvo.subject} (${grupoAlvo.id})`);
-        agendarTarefas(sock, jidGrupoGlobal);
-      } else {
-        console.log(`Grupo "${GRUPO_NOME}" nao encontrado. Grupos disponíveis:`);
-        gruposArr.forEach(g => console.log(` - ${g.subject}`));
-      }
-    }
-    if (connection === 'close') {
-      botConectado = false;
-      const statusCode = (lastDisconnect?.error instanceof Boom)
-        ? lastDisconnect.error.output?.statusCode
-        : null;
-
-      // Código 515 = restartRequired → NÃO é logout, apenas reinicia o socket imediatamente
-      // Código 401 = loggedOut → sessão expirou, limpar credenciais
-      const isRestartRequired = statusCode === 515;
-      const loggedOut = statusCode === DisconnectReason.loggedOut; // 401
-
-      console.log(`Conexao encerrada. Codigo: ${statusCode}. LoggedOut: ${loggedOut}`);
-
-      if (loggedOut) {
-        console.log('Sessao expirada. Removendo credenciais locais e limpando Render...');
-        try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
-        await limparCREDSnoRender();
-      }
-
-      if (!reconectando) {
-        reconectando = true;
-        // Código 515: reconecta imediatamente (sem delay), pois é apenas restart do socket
-        const delay = isRestartRequired ? 0 : (loggedOut ? 3000 : 5000);
-        setTimeout(() => { reconectando = false; conectarBot(); }, delay);
-      }
-    }
-  });
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const msg of messages) {
-      try {
-        if (msg.key.fromMe) continue;
-        if (!jidGrupoGlobal || msg.key.remoteJid !== jidGrupoGlobal) continue;
-        if (msg.message?.protocolMessage) continue;
-
-        const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
-        if (msg.message?.audioMessage && GROQ_API_KEY) {
-          try {
-            const buffer = await downloadMediaMessage(msg, 'buffer', {});
-            const mimeType = msg.message.audioMessage.mimetype || 'audio/ogg';
-            let transcricao = await transcreverAudio(buffer, mimeType);
-            if (transcricao) {
-              transcricao = limparTranscricao(transcricao);
-              transcricao = corrigirTranscricao(transcricao);
-              console.log('Transcricao:', transcricao);
-              const resposta = await processarTexto(transcricao, msg.key.remoteJid, sock);
-              if (resposta) await sock.sendMessage(jidGrupoGlobal, { text: resposta });
-            }
-          } catch(e) { console.error('Erro ao processar audio:', e.message); }
-          continue;
-        }
-
-        const texto = (
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption ||
-          ''
-        ).trim();
-
-        if (!texto) continue;
-        console.log('Mensagem recebida:', texto);
-        const resposta = await processarTexto(texto, msg.key.remoteJid, sock);
-        if (resposta) await sock.sendMessage(jidGrupoGlobal, { text: resposta });
-      } catch(e) { console.error('Erro ao processar mensagem:', e.message); }
-    }
-  });
-}
-
-conectarBot().catch(err => console.error('Erro fatal ao iniciar bot:', err.message));
+  } catch(err){console.error('Erro historico:',err.message);return '\u27
