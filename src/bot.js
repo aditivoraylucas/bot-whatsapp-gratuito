@@ -42,10 +42,10 @@ async function limparSessaoNoRender() {
     const resGet  = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
     });
-    const envVars  = await resGet.json();
+    const envVars   = await resGet.json();
     const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
     const novas = existente
-      .filter(v => v.key !== 'CREDS_JSON')
+      .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
       .map(v => ({ key: v.key, value: v.value }));
     await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       method: 'PUT',
@@ -101,8 +101,12 @@ async function salvarSessaoNoRender() {
     }
     const envVars   = await resGet.json();
     const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
-    const novas     = [
-      ...existente.filter(v => v.key !== 'CREDS_JSON').map(v => ({ key: v.key, value: v.value })),
+
+    // Filtra chaves vazias e remove CREDS_JSON antigo, depois adiciona o novo
+    const novas = [
+      ...existente
+        .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
+        .map(v => ({ key: v.key, value: v.value })),
       { key: 'CREDS_JSON', value: conteudo },
     ];
 
