@@ -9,7 +9,7 @@ const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ────────────────────────────────────────────────────
+// ── Estado compartilhado ─────────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -18,15 +18,7 @@ let ultimoDiaLembrete     = '';
 let ultimoDiaResumo       = '';
 let pairingPendente       = false;
 let pairingNumero         = '';
-
-// ── Debounce para evitar múltiplas chamadas ao salvar sessão ────────────────
-let _debounceTimer = null;
-function debounce(fn, ms) {
-  return (...args) => {
-    clearTimeout(_debounceTimer);
-    _debounceTimer = setTimeout(() => fn(...args), ms);
-  };
-}
+let _jaReiniciouParaCreds = false; // evita loop de restart
 
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
@@ -34,14 +26,27 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Sessão persistente ──────────────────────────────────────────────────────
+// ── Sessão persistente ──────────────────────────────────────────────────────────────
+// O AUTH_DIR no Render é efêmero entre deploys, mas persiste entre restarts do mesmo deploy.
+// Na primeira execução (ou após deploy), restauramos do CREDS_JSON (env var).
+// Ao conectar com sucesso, salvamos o CREDS_JSON na Render API e reiniciamos
+// UMA única vez para que o próximo restart já use as creds atualizadas.
 function restaurarSessao() {
   try {
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    // Se já existe localmente neste processo (restart dentro do mesmo deploy), usa o existente
+    if (fs.existsSync(credsPath)) {
+      console.log('[restaurarSessao] Usando creds.json local existente.');
+      return true;
+    }
     const credsJson = process.env.CREDS_JSON;
-    if (!credsJson) { console.log('[restaurarSessao] CREDS_JSON não definido – será necessário novo pairing.'); return false; }
+    if (!credsJson) {
+      console.log('[restaurarSessao] CREDS_JSON não definido – será necessário novo pairing.');
+      return false;
+    }
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-    fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
-    console.log('Sessao restaurada do CREDS_JSON');
+    fs.writeFileSync(credsPath, credsJson, 'utf8');
+    console.log('[restaurarSessao] Sessao restaurada do CREDS_JSON.');
     return true;
   } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
 }
@@ -52,8 +57,11 @@ async function salvarSessaoNoRender() {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (!fs.existsSync(credsPath)) return;
     const conteudo = fs.readFileSync(credsPath, 'utf8');
-    const fetch    = (await import('node-fetch')).default;
-    const resGet   = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+
+    // Não salva se o conteúdo é idêntico ao que já está na env var
+    if (conteudo === process.env.CREDS_JSON) return;
+
+    const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
     });
     const envVars   = await resGet.json();
@@ -65,13 +73,18 @@ async function salvarSessaoNoRender() {
       body: JSON.stringify(novas),
     });
     console.log('Sessao salva no Render!');
+
+    // Reinicia o processo UMA única vez para que o próximo boot leia o CREDS_JSON atualizado.
+    // Isso é necessário porque env vars só são relidas no início do processo.
+    if (!_jaReiniciouParaCreds) {
+      _jaReiniciouParaCreds = true;
+      console.log('[sessão] Reiniciando processo para fixar CREDS_JSON atualizado...');
+      setTimeout(() => process.exit(0), 2000);
+    }
   } catch (e) { console.error('Erro ao salvar sessao:', e.message); }
 }
 
-// Versão com debounce de 3s — agrupa múltiplos creds.update em uma só chamada
-const salvarSessaoDebounced = debounce(salvarSessaoNoRender, 3000);
-
-// ── iniciarBot ──────────────────────────────────────────────────────────────
+// ── iniciarBot ───────────────────────────────────────────────────────────────
 async function iniciarBot() {
   restaurarSessao();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -89,10 +102,10 @@ async function iniciarBot() {
 
   sockGlobal = sock;
 
-  // Usa debounce: múltiplos creds.update viram uma única chamada após 3s de "silêncio"
   sock.ev.on('creds.update', async () => {
     await saveCreds();
-    salvarSessaoDebounced();
+    // Salva no Render apenas se as creds mudaram (evita chamadas desnecessárias)
+    await salvarSessaoNoRender();
   });
 
   sock.ev.on('connection.update', async (update) => {
@@ -106,7 +119,8 @@ async function iniciarBot() {
       botConectado    = true;
       pairingPendente = false;
       console.log('✅ Bot conectado ao WhatsApp!');
-      await salvarSessaoNoRender(); // chamada direta e única no momento da conexão
+      // Salva e reinicia uma vez para fixar as creds
+      await salvarSessaoNoRender();
 
       if (!agendamentosIniciados) {
         agendamentosIniciados = true;
