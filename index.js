@@ -264,8 +264,8 @@ function nomeProdutoExib(produto) {
 
 let botConectado=false;
 // ─── ESTADO DO PAIRING CODE ───────────────────────────────────────────────────
-let pairingCodeGerado=null;   // código de 8 dígitos retornado pelo Baileys
-let pairingAguardando=false;  // true enquanto espera o usuário digitar o número
+let pairingCodeGerado=null;
+let pairingAguardando=false;
 let sockGlobal=null;
 let jidGrupoGlobal=null;
 let agendamentosIniciados=false;
@@ -273,11 +273,6 @@ let horaConexao=null;
 let nomeGrupoConectado=null;
 
 // ─── BUG 3 FIX: restaurarSessao com normalização de escapes e log real ────────
-// Problema anterior: CREDS_JSON serializado pelo Render pode conter \\n (escape
-// duplo). JSON.parse lançava exceção silenciada, bot pedia novo pairing sem
-// indicar o motivo real.
-// Correção: normaliza \\n → \n antes do parse; valida o JSON resultante;
-// exibe no console o erro exato caso ainda falhe.
 function restaurarSessao() {
   try {
     let credsJson = process.env.CREDS_JSON;
@@ -285,10 +280,8 @@ function restaurarSessao() {
       console.log('[restaurarSessao] CREDS_JSON não definido — será necessário novo pairing.');
       return false;
     }
-
     // Normaliza escapes duplos que o Render pode introduzir na variável de ambiente
     credsJson = credsJson.replace(/\\\\n/g, '\\n');
-
     // Valida que é um JSON legítimo antes de gravar no disco
     try {
       JSON.parse(credsJson);
@@ -297,7 +290,6 @@ function restaurarSessao() {
       console.error('[restaurarSessao] Primeiros 120 chars do CREDS_JSON:', credsJson.slice(0, 120));
       return false;
     }
-
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
     fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
     console.log('[restaurarSessao] Sessão restaurada com sucesso do CREDS_JSON.');
@@ -334,7 +326,7 @@ async function salvarSessaoNoRender() {
   } catch(e){console.error('Erro ao salvar sessao:',e.message);}
 }
 
-// ─── LIMPAR CREDS_JSON NO RENDER (chamado quando sessao expira / loggedOut) ───
+// ─── LIMPAR CREDS_JSON NO RENDER ─────────────────────────────────────────────
 async function limparCREDSnoRender() {
   try {
     if(!RENDER_API_KEY||!RENDER_SERVICE_ID) return;
@@ -359,14 +351,12 @@ async function limparCREDSnoRender() {
 // ─── SERVIDOR HTTP (frontend de pairing code) ─────────────────────────────────
 const server = http.createServer(async (req, res) => {
   try {
-    // POST /pair  →  recebe { number: "5511999999999" } e solicita o código
     if (req.method === 'POST' && req.url === '/pair') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', async () => {
         try {
           const { number } = JSON.parse(body);
-          // Valida e normaliza: remove tudo que não for dígito
           const clean = (number || '').replace(/\D/g, '');
           if (!clean || clean.length < 10 || clean.length > 15) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -408,7 +398,6 @@ const server = http.createServer(async (req, res) => {
         <script>setTimeout(()=>location.reload(),60000)</script>
       </body></html>`);
     } else {
-      // ── Tela de Pairing Code ──────────────────────────────────────────────
       res.end(`<!DOCTYPE html><html lang="pt-BR"><head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -435,17 +424,14 @@ const server = http.createServer(async (req, res) => {
         <div class="card">
           <h1>&#x1F4F1; Conectar WhatsApp</h1>
           <p class="sub">Insira o número do WhatsApp que será vinculado ao bot (com código do país, sem espaços ou traços).</p>
-
           <input id="num" type="tel" placeholder="Ex: 5511999999999" maxlength="15" autocomplete="off">
           <button id="btn" onclick="solicitar()">Gerar código de emparelhamento</button>
           <div id="error" class="error"></div>
-
           <div id="result" style="display:none" class="code-box">
             <p style="margin:0 0 8px;font-size:.9rem;font-weight:600;color:#333">Seu código:</p>
             <span id="code"></span>
             <p>Abra o WhatsApp &rarr; <b>Configurações</b> &rarr; <b>Aparelhos conectados</b> &rarr; <b>Conectar um aparelho</b> &rarr; <b>Conectar com número de telefone</b> e insira o código acima.</p>
           </div>
-
           <div class="steps">
             <b>Passo a passo:</b><br>
             1. Digite o número com DDI (55 para Brasil) + DDD + número<br>
@@ -454,14 +440,9 @@ const server = http.createServer(async (req, res) => {
             4. Digite o código de 8 dígitos exibido acima
           </div>
         </div>
-
         <script>
           const input = document.getElementById('num');
-          // Permite apenas dígitos no input
-          input.addEventListener('input', () => {
-            input.value = input.value.replace(/\\D/g, '');
-          });
-
+          input.addEventListener('input', () => { input.value = input.value.replace(/\\D/g, ''); });
           async function solicitar() {
             const btn = document.getElementById('btn');
             const errEl = document.getElementById('error');
@@ -469,13 +450,11 @@ const server = http.createServer(async (req, res) => {
             const codeEl = document.getElementById('code');
             errEl.textContent = '';
             result.style.display = 'none';
-
             const number = input.value.replace(/\\D/g, '');
             if (!number || number.length < 10 || number.length > 15) {
               errEl.textContent = 'Número inválido. Use DDI + DDD + número (ex: 5511999999999).';
               return;
             }
-
             btn.disabled = true;
             btn.textContent = 'Aguardando...';
             try {
@@ -491,7 +470,6 @@ const server = http.createServer(async (req, res) => {
                 btn.textContent = 'Gerar código de emparelhamento';
                 return;
               }
-              // Formata o código como XXXX-XXXX
               const raw = (data.code || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
               codeEl.textContent = raw.length === 8 ? raw.slice(0,4) + '-' + raw.slice(4) : raw;
               result.style.display = 'block';
@@ -502,8 +480,6 @@ const server = http.createServer(async (req, res) => {
               btn.textContent = 'Gerar código de emparelhamento';
             }
           }
-
-          // Recarrega automaticamente quando o bot conectar
           setInterval(async () => {
             try {
               const r = await fetch('/');
@@ -521,16 +497,14 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`\u2705 Servidor rodando na porta ${PORT}`));
 
-// ─── CACHE DO JWT (evita criar novo cliente a cada chamada) ───────────────────
+// ─── CACHE DO JWT ─────────────────────────────────────────────────────────────
 let _jwtCache = null;
 let _jwtCriadoEm = 0;
-const JWT_TTL_MS = 50 * 60 * 1000; // 50 minutos (token expira em 60)
+const JWT_TTL_MS = 50 * 60 * 1000;
 
 function getAuth() {
   const agora2 = Date.now();
-  if (_jwtCache && (agora2 - _jwtCriadoEm) < JWT_TTL_MS) {
-    return _jwtCache;
-  }
+  if (_jwtCache && (agora2 - _jwtCriadoEm) < JWT_TTL_MS) return _jwtCache;
   _jwtCache = new JWT({
     email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
     key: GOOGLE_PRIVATE_KEY,
@@ -557,7 +531,6 @@ async function comRetry(fn, tentativas = 4, espera = 2000) {
         console.log(`Erro de rede (tentativa ${i + 1}/${tentativas}): ${err.message}. Tentando novamente em ${espera}ms...`);
         await new Promise(r => setTimeout(r, espera));
         espera *= 2;
-        // invalida o cache do JWT para forçar novo token na próxima tentativa
         _jwtCache = null;
       } else {
         throw err;
@@ -591,15 +564,11 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
     const valorNovo  = precoAtual * quantidade;
     const existente  = rows.find(r=>mesmoNome(r.get('Cliente'),clienteEnviado)&&norm(r.get('Produto'))===norm(produto));
     const cliente    = existente ? existente.get('Cliente') : capitalizarNome(clienteEnviado);
-
     if(LIMITE_CREDITO_PADRAO>0){
       const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),clienteEnviado));
       const totalAtual=rowsC.reduce((s,r)=>s+parseFloat(r.get('Total')||'0'),0);
-      if(totalAtual+valorNovo>LIMITE_CREDITO_PADRAO){
-        return { cliente, limiteBloqueado: true, totalAtual, valorNovo };
-      }
+      if(totalAtual+valorNovo>LIMITE_CREDITO_PADRAO) return { cliente, limiteBloqueado: true, totalAtual, valorNovo };
     }
-
     if(existente){
       const qtdAcumulada   = parseInt(existente.get('Quantidade')||'0')+quantidade;
       const totalAcumulado = parseFloat(existente.get('Total')||'0')+valorNovo;
@@ -628,12 +597,10 @@ async function cancelarLancamento(jid, nomeDigitado) {
     if(idx<0) return `\u274c Nenhum lan\u00e7amento recente encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const lanc = hist[idx];
     hist.splice(idx,1);
-
     const sheet=await getSheetSaldo();
     const rows=await sheet.getRows();
     const sheetH=await getSheetHistorico();
     const rowsH=await sheetH.getRows();
-
     if(lanc.tipo==='compra'){
       const row=rows.find(r=>r.get('Cliente')===lanc.cliente&&norm(r.get('Produto'))===norm(lanc.produto));
       if(row){
@@ -649,7 +616,6 @@ async function cancelarLancamento(jid, nomeDigitado) {
       }
       return `\u2197\ufe0f Lan\u00e7amento cancelado: *${lanc.cliente}* - ${lanc.quantidade}x ${nomeProdutoExib(lanc.produto)} (R$ ${lanc.valor.toFixed(2)})`;
     }
-
     if(lanc.tipo==='pagamento'){
       const rowsC=rows.filter(r=>mesmoNome(r.get('Cliente'),lanc.cliente));
       if(rowsC.length){
@@ -672,12 +638,11 @@ async function cancelarLancamento(jid, nomeDigitado) {
       }
       return `\u2197\ufe0f Pagamento cancelado: *${lanc.cliente}* - R$ ${lanc.valor.toFixed(2)} devolvido ao saldo.`;
     }
-
     return '\u274c N\u00e3o foi poss\u00edvel cancelar.';
   } catch(err){console.error('Erro cancelar:',err.message);return '\u274c Erro ao cancelar lan\u00e7amento.';}
 }
 
-// ─── PAGAMENTO POR PRODUTO (ex: julia pagou 2 trufas) ─────────────────────────
+// ─── PAGAMENTO POR PRODUTO ────────────────────────────────────────────────────
 async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid) {
   try {
     const sheet=await getSheetSaldo();
@@ -703,10 +668,10 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     row.set('Total',novoTotal.toFixed(2));
     await row.save();
     return {ok:true,msg:`\u2705 *${cliente}* pagou ${qtdPaga} ${nomeProdutoExib(produto)}(s) = R$ ${pago.toFixed(2)}\nRestante: ${novaQtd} unid. = R$ ${novoTotal.toFixed(2)}`};
-  } catch(err){console.error('Erro pag produto:',err.message);return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
+  } catch(err){console.error('Erro pag produto:',err.message);return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
-// ─── PAGAMENTO POR VALOR (ex: julia pagou 10, julia pix 10) ───────────────────
+// ─── PAGAMENTO POR VALOR ──────────────────────────────────────────────────────
 async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   try {
     const sheet=await getSheetSaldo();
@@ -743,7 +708,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
       }
     }
     return {ok:true,msg:`\u2705 *${cliente}* pagou R$ ${valorPago.toFixed(2)}\nRestante devido: R$ ${(totalDevido-valorPago).toFixed(2)}`};
-  } catch(err){console.error('Erro pag valor:',err.message);return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};} 
+  } catch(err){console.error('Erro pag valor:',err.message);return {ok:false,msg:'\u274c Erro ao registrar pagamento.'};}
 }
 
 // ─── RELATORIO GERAL ──────────────────────────────────────────────────────────
@@ -769,9 +734,8 @@ async function gerarRelatorioGeral() {
     let totalGeral=0;
     for(const [nome,dados] of ordenados){
       resposta+=`\n*${nome}*\n`;
-      for(const item of dados.itens){
+      for(const item of dados.itens)
         resposta+=`  ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
-      }
       resposta+=`  *Total: R$ ${dados.totalDevido.toFixed(2)}*\n`;
       totalGeral+=dados.totalDevido;
     }
@@ -828,7 +792,7 @@ async function carregarHistoricoAgrupado(filtroMes) {
   return{historico,saldos};
 }
 
-// ─── RELATORIO DETALHADO (só devedores) ───────────────────────────────────────
+// ─── RELATORIO DETALHADO ──────────────────────────────────────────────────────
 async function gerarRelatorioDetalhado() {
   try {
     const{historico,saldos}=await carregarHistoricoAgrupado();
@@ -843,11 +807,8 @@ async function gerarRelatorioDetalhado() {
       const saldoAtual=saldos[nome]||0;
       resposta+=`\n*${nome}*\n`;
       for(const m of movs){
-        if(m.tipo==='Compra'){
-          resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        } else if(m.tipo==='Pagamento'){
-          resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        }
+        if(m.tipo==='Compra') resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
+        else if(m.tipo==='Pagamento') resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
       }
       resposta+=`  *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
       totalGeral+=saldoAtual;
@@ -871,11 +832,8 @@ async function gerarRelatorioQuitados() {
       const totalPago=movs.filter(m=>m.tipo==='Pagamento').reduce((s,m)=>s+m.valor,0);
       resposta+=`\n*${nome}*\n`;
       for(const m of movs){
-        if(m.tipo==='Compra'){
-          resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        } else if(m.tipo==='Pagamento'){
-          resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
-        }
+        if(m.tipo==='Compra') resposta+=`  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
+        else if(m.tipo==='Pagamento') resposta+=`  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
       }
       resposta+=`  \u2705 Quitado | Total pago: R$ ${totalPago.toFixed(2)}\n`;
     }
@@ -948,6 +906,319 @@ async function gerarHistoricoCliente(nomeDigitado) {
 async function getDocComSheets() {
   const doc = await getDoc();
   const sheetSaldo = doc.sheetsByIndex[0];
-  const sheetHistorico = doc.sheetCount >= 2 ? doc.sheetsByIndex[1] : await doc.addSheet({title:'Historico',headerValues:['Data','Cliente','Tipo','Produto','Quantidade','Valor']});
+  const sheetHistorico = doc.sheetCount >= 2
+    ? doc.sheetsByIndex[1]
+    : await doc.addSheet({title:'Historico',headerValues:['Data','Cliente','Tipo','Produto','Quantidade','Valor']});
   return { doc, sheetSaldo, sheetHistorico };
 }
+
+// ─── PROCESSAR MENSAGEM ───────────────────────────────────────────────────────
+async function processarMensagem(sock, msg, jidGrupo) {
+  try {
+    const jid = msg.key.remoteJid;
+    if (jid !== jidGrupo) return;
+
+    let texto = null;
+
+    // Áudio: tenta transcrever via Groq
+    const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+    if (msg.message?.audioMessage && GROQ_API_KEY) {
+      try {
+        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+        const mimeType = msg.message.audioMessage.mimetype || 'audio/ogg; codecs=opus';
+        const transcrito = await transcreverAudio(buffer, mimeType);
+        if (transcrito) {
+          texto = limparTranscricao(corrigirTranscricao(transcrito));
+          console.log('[VOZ] Transcrito:', texto);
+        }
+      } catch (e) {
+        console.error('[VOZ] Erro ao transcrever áudio:', e.message);
+      }
+    }
+
+    // Texto normal
+    if (!texto) {
+      texto = msg.message?.conversation
+        || msg.message?.extendedTextMessage?.text
+        || msg.message?.imageMessage?.caption
+        || null;
+    }
+
+    if (!texto) return;
+
+    const t = norm(texto);
+    const partes = t.split(/\s+/).filter(Boolean);
+    if (!partes.length) return;
+
+    const responder = async (conteudo) => {
+      await sock.sendMessage(jidGrupo, { text: conteudo }, { quoted: msg });
+    };
+
+    // ── AJUDA ──────────────────────────────────────────────────────────────────
+    if (t === 'ajuda' || t === 'help' || t === '?') {
+      return responder(
+        '*Comandos disponíveis:*\n' +
+        '─────────────────\n' +
+        '*Registrar compra:* nome quantidade produto\n' +
+        '  Ex: _julia 2 trufas_\n\n' +
+        '*Registrar pagamento (valor):* nome pagou valor\n' +
+        '  Ex: _julia pagou 10_ ou _julia pix 15_\n\n' +
+        '*Registrar pagamento (produto):* nome pagou qtd produto\n' +
+        '  Ex: _julia pagou 2 trufas_\n\n' +
+        '*Ver saldo:* saldo nome\n' +
+        '  Ex: _saldo julia_\n\n' +
+        '*Histórico:* historico nome\n' +
+        '  Ex: _historico julia_\n\n' +
+        '*Cancelar último:* cancelar nome\n' +
+        '  Ex: _cancelar julia_\n\n' +
+        '*Relatório geral:* relatorio\n' +
+        '*Relatório detalhado:* resumo\n' +
+        '*Quitados:* quitados\n' +
+        '*Preços:* precos\n' +
+        '*Produtos:* produtos'
+      );
+    }
+
+    // ── PREÇOS ────────────────────────────────────────────────────────────────
+    if (t === 'precos' || t === 'preco' || t === 'valor' || t === 'valores') {
+      const lista = Object.entries(PRECOS)
+        .map(([p, v]) => `${emojiProduto(p)} ${nomeProdutoExib(p)}: R$ ${v.toFixed(2)}`)
+        .join('\n');
+      return responder(`*Tabela de Preços:*\n─────────────────\n${lista}`);
+    }
+
+    // ── DEFINIR PREÇO: preco trufa 6 ─────────────────────────────────────────
+    if (partes[0] === 'preco' && partes.length === 3) {
+      const prod = toProduto(partes[1]);
+      const val  = parseFloat(partes[2].replace(',', '.'));
+      if (prod && !isNaN(val) && val > 0) {
+        PRECOS[prod] = val;
+        salvarPrecos();
+        return responder(`\u2705 Preço de ${nomeProdutoExib(prod)} atualizado para R$ ${val.toFixed(2)}.`);
+      }
+    }
+
+    // ── PRODUTOS ──────────────────────────────────────────────────────────────
+    if (t === 'produtos') {
+      const lista = Object.keys(todosOsSinonimos())
+        .map(p => `${emojiProduto(p)} ${nomeProdutoExib(p)}`)
+        .join('\n');
+      return responder(`*Produtos cadastrados:*\n─────────────────\n${lista}`);
+    }
+
+    // ── RELATÓRIO GERAL ───────────────────────────────────────────────────────
+    if (t === 'relatorio' || t === 'rel') {
+      return responder(await gerarRelatorioGeral());
+    }
+
+    // ── RELATÓRIO DETALHADO ───────────────────────────────────────────────────
+    if (t === 'resumo' || t === 'detalhado') {
+      return responder(await gerarRelatorioDetalhado());
+    }
+
+    // ── QUITADOS ──────────────────────────────────────────────────────────────
+    if (t === 'quitados' || t === 'pagos') {
+      return responder(await gerarRelatorioQuitados());
+    }
+
+    // ── SALDO: saldo nome ─────────────────────────────────────────────────────
+    if (partes[0] === 'saldo' && partes.length >= 2) {
+      const nome = partes.slice(1).join(' ');
+      return responder(await gerarSaldoIndividual(nome));
+    }
+
+    // ── HISTÓRICO: historico nome [mes] ───────────────────────────────────────
+    if ((partes[0] === 'historico' || partes[0] === 'hist') && partes.length >= 2) {
+      const nomeRaw = partes.slice(1).join(' ');
+      return responder(await gerarHistoricoCliente(nomeRaw));
+    }
+
+    // ── CANCELAR: cancelar nome ───────────────────────────────────────────────
+    if (partes[0] === 'cancelar' && partes.length >= 2) {
+      const nome = partes.slice(1).join(' ');
+      return responder(await cancelarLancamento(jid, nome));
+    }
+
+    // ── ZERAR: zerar nome ─────────────────────────────────────────────────────
+    if (partes[0] === 'zerar' && partes.length >= 2) {
+      try {
+        const nome = partes.slice(1).join(' ');
+        const sheet = await getSheetSaldo();
+        const rows  = await sheet.getRows();
+        const nomesConhecidos = [...new Set(rows.map(r=>(r.get('Cliente')||'').trim()).filter(Boolean))];
+        const nomeCanon = resolverNome(nome, nomesConhecidos);
+        if (!nomeCanon) return responder(`\u274c Cliente *${capitalizarNome(nome)}* não encontrado.`);
+        const rowsC = rows.filter(r => r.get('Cliente') === nomeCanon);
+        for (const r of rowsC) await r.delete();
+        return responder(`\u2705 Dívida de *${nomeCanon}* zerada com sucesso.`);
+      } catch(e) {
+        return responder('\u274c Erro ao zerar dívida.');
+      }
+    }
+
+    // ── PAGAMENTO: nome pagou/pix/transferiu [qtd produto | valor] ────────────
+    const verboPag = ['pagou','pix','transferiu','transfere','depositou','mandou','enviou'];
+    const idxVerbo = partes.findIndex(p => verboPag.includes(p));
+    if (idxVerbo > 0) {
+      const nomeDigitado = partes.slice(0, idxVerbo).join(' ');
+      const resto = partes.slice(idxVerbo + 1);
+
+      // Tenta: nome pagou qtd produto
+      if (resto.length >= 2) {
+        const qtd = toNumero(resto[0]);
+        const prod = toProduto(resto.slice(1).join(' '));
+        if (qtd && prod) {
+          const result = await processarPagamentoProduto(nomeDigitado, qtd, prod, jid);
+          return responder(result.msg);
+        }
+      }
+
+      // Tenta: nome pagou valor
+      const valorStr = resto.join(' ');
+      const valor = extrairValor(valorStr);
+      if (valor && valor > 0) {
+        const result = await processarPagamentoValor(nomeDigitado, valor, jid);
+        return responder(result.msg);
+      }
+
+      return responder(`\u274c Não entendi o pagamento. Ex: _julia pagou 10_ ou _julia pagou 2 trufas_`);
+    }
+
+    // ── COMPRA: nome qtd produto ──────────────────────────────────────────────
+    // Formato: [nome...] [qtd] [produto...] ou [nome...] [produto...] [qtd]
+    if (partes.length >= 3) {
+      // Tenta encontrar um número e um produto na mensagem
+      let qtdIdx = -1, qtd = null;
+      for (let i = 0; i < partes.length; i++) {
+        const n = toNumero(partes[i]);
+        if (n) { qtdIdx = i; qtd = n; break; }
+      }
+      if (qtdIdx > 0 && qtd) {
+        // nome vem antes do número; produto vem depois
+        const nomeDigitado = partes.slice(0, qtdIdx).join(' ');
+        const prodStr = partes.slice(qtdIdx + 1).join(' ');
+        const prod = toProduto(prodStr);
+        if (prod) {
+          const result = await registrarOuAcumular(nomeDigitado, prod, qtd);
+          if (!result) return responder('\u274c Erro ao registrar. Tente novamente.');
+          if (result.limiteBloqueado) {
+            return responder(
+              `\u26a0\ufe0f *${result.cliente}* atingiu o limite de crédito de R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}.\n` +
+              `Saldo atual: R$ ${result.totalAtual.toFixed(2)} | Novo lançamento: R$ ${result.valorNovo.toFixed(2)}`
+            );
+          }
+          pushLancamento(jid, { tipo: 'compra', cliente: result.cliente, produto: prod, quantidade: qtd, valor: qtd * (PRECOS[prod] || 0) });
+          return responder(
+            `${emojiProduto(prod)} *${result.cliente}* — ${result.qtdAcumulada}x ${nomeProdutoExib(prod)}\n` +
+            `Total: R$ ${result.totalAcumulado.toFixed(2)}`
+          );
+        }
+      }
+    }
+
+  } catch (e) {
+    console.error('[processarMensagem] Erro:', e.message);
+  }
+}
+
+// ─── BUG 2 FIX: conectarBot() com makeWASocket e printQRInTerminal: false ─────
+// Problema anterior: esta função estava completamente ausente do arquivo enviado
+// ao GitHub. sockGlobal permanecia null para sempre, e o endpoint /pair
+// retornava 503 eternamente.
+async function conectarBot() {
+  try {
+    restaurarSessao();
+
+    const { version } = await fetchLatestBaileysVersion();
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+    const sock = makeWASocket({
+      version,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+      },
+      printQRInTerminal: false,   // ← CRÍTICO: evita conflito com Pairing Code
+      logger: pino({ level: 'silent' }),
+      browser: Browsers.ubuntu('Chrome'),
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+    });
+
+    sockGlobal = sock;
+    console.log('\u2705 makeWASocket inicializado — sockGlobal pronto.');
+
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+      await salvarSessaoNoRender();
+    });
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (connection === 'open') {
+        botConectado = true;
+        horaConexao  = new Date();
+        console.log('\u2705 Bot conectado ao WhatsApp!');
+
+        // Identifica o grupo alvo pelo nome
+        if (!jidGrupoGlobal) {
+          try {
+            const grupos = await sock.groupFetchAllParticipating();
+            for (const [jid, meta] of Object.entries(grupos)) {
+              if (norm(meta.subject).includes(norm(GRUPO_NOME))) {
+                jidGrupoGlobal  = jid;
+                nomeGrupoConectado = meta.subject;
+                console.log(`\u2705 Grupo encontrado: ${meta.subject} (${jid})`);
+                break;
+              }
+            }
+            if (!jidGrupoGlobal) console.warn(`\u26a0\ufe0f Grupo "${GRUPO_NOME}" não encontrado. Verifique a variável GRUPO_NOME.`);
+          } catch (e) {
+            console.error('Erro ao buscar grupos:', e.message);
+          }
+        }
+      }
+
+      if (connection === 'close') {
+        botConectado  = false;
+        sockGlobal    = null;
+        const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        console.log(`Conexão encerrada. Código: ${statusCode}`);
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log('Sessão encerrada (loggedOut). Limpando credenciais...');
+          await limparCREDSnoRender();
+          try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch(e) {}
+          setTimeout(conectarBot, 3000);
+        } else if (
+          statusCode === DisconnectReason.connectionReplaced ||
+          statusCode === DisconnectReason.connectionClosed  ||
+          statusCode === DisconnectReason.timedOut
+        ) {
+          console.log('Reconectando em 5s...');
+          setTimeout(conectarBot, 5000);
+        } else {
+          console.log('Reconectando em 10s...');
+          setTimeout(conectarBot, 10000);
+        }
+      }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+      for (const msg of messages) {
+        if (msg.key.fromMe) continue;
+        if (!jidGrupoGlobal) continue;
+        await processarMensagem(sock, msg, jidGrupoGlobal);
+      }
+    });
+
+  } catch (e) {
+    console.error('Erro em conectarBot():', e.message);
+    setTimeout(conectarBot, 10000);
+  }
+}
+
+// ─── INICIALIZAÇÃO ────────────────────────────────────────────────────────────
+conectarBot();
