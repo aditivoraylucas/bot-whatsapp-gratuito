@@ -9,7 +9,7 @@ const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ────────────────────────────────────────────
+// ── Estado compartilhado ────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -19,13 +19,22 @@ let ultimoDiaResumo       = '';
 let pairingPendente       = false;
 let pairingNumero         = '';
 
+// ── Debounce para evitar múltiplas chamadas ao salvar sessão ────────────────
+let _debounceTimer = null;
+function debounce(fn, ms) {
+  return (...args) => {
+    clearTimeout(_debounceTimer);
+    _debounceTimer = setTimeout(() => fn(...args), ms);
+  };
+}
+
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
 function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Sessão persistente ──────────────────────────────────────────────────
+// ── Sessão persistente ──────────────────────────────────────────────────────
 function restaurarSessao() {
   try {
     const credsJson = process.env.CREDS_JSON;
@@ -59,7 +68,10 @@ async function salvarSessaoNoRender() {
   } catch (e) { console.error('Erro ao salvar sessao:', e.message); }
 }
 
-// ── iniciarBot ──────────────────────────────────────────────────────────
+// Versão com debounce de 3s — agrupa múltiplos creds.update em uma só chamada
+const salvarSessaoDebounced = debounce(salvarSessaoNoRender, 3000);
+
+// ── iniciarBot ──────────────────────────────────────────────────────────────
 async function iniciarBot() {
   restaurarSessao();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -77,9 +89,10 @@ async function iniciarBot() {
 
   sockGlobal = sock;
 
+  // Usa debounce: múltiplos creds.update viram uma única chamada após 3s de "silêncio"
   sock.ev.on('creds.update', async () => {
     await saveCreds();
-    await salvarSessaoNoRender();
+    salvarSessaoDebounced();
   });
 
   sock.ev.on('connection.update', async (update) => {
@@ -93,7 +106,7 @@ async function iniciarBot() {
       botConectado    = true;
       pairingPendente = false;
       console.log('✅ Bot conectado ao WhatsApp!');
-      await salvarSessaoNoRender();
+      await salvarSessaoNoRender(); // chamada direta e única no momento da conexão
 
       if (!agendamentosIniciados) {
         agendamentosIniciados = true;
