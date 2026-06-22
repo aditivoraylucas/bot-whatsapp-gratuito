@@ -14,21 +14,27 @@ const {
   ULTIMOS_LANCAMENTOS, pushLancamento,
 } = require('./utils');
 
-// ── Autenticação e doc ────────────────────────────────────────────────────────
+// ── Autenticação com cache ────────────────────────────────────────────────────
+// Reutiliza o mesmo objeto JWT entre chamadas para evitar múltiplos handshakes OAuth
+let _authCache = null;
 function getAuth() {
-  return new JWT({
-    email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    key:   GOOGLE_PRIVATE_KEY,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
+  if (!_authCache) {
+    _authCache = new JWT({
+      email:  GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      key:    GOOGLE_PRIVATE_KEY,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+  }
+  return _authCache;
 }
 
+// Aumentado para 6 tentativas — cobre casos de "Premature close" ao acordar do sleep
 async function getDoc() {
   return comRetry(async () => {
     const doc = new GoogleSpreadsheet(SPREADSHEET_ID, getAuth());
     await doc.loadInfo();
     return doc;
-  }, 4, 'getDoc');
+  }, 6, 'getDoc');
 }
 
 async function getSheetSaldo(doc) {
@@ -69,11 +75,11 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
       existente.set('Total', totalAcumulado.toFixed(2));
       existente.set('UltimaCompra', agora());
       await existente.save();
-      await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2) }), 4, 'addRow Historico Compra');
+      await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2) }), 6, 'addRow Historico Compra');
       return { cliente, totalAcumulado, qtdAcumulada };
     } else {
-      await comRetry(() => sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: valorNovo.toFixed(2), UltimaCompra: agora() }), 4, 'addRow Saldo');
-      await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2) }), 4, 'addRow Historico Compra');
+      await comRetry(() => sheet.addRow({ Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: valorNovo.toFixed(2), UltimaCompra: agora() }), 6, 'addRow Saldo');
+      await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2) }), 6, 'addRow Historico Compra');
       return { cliente, totalAcumulado: valorNovo, qtdAcumulada: quantidade };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
@@ -152,7 +158,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const pago       = qtdAtual > 0 ? (totalAtual / qtdAtual) * qtdPaga : 0;
     if (jid) pushLancamento(jid, { tipo: 'pagamento', cliente: row.get('Cliente'), produto, quantidade: qtdPaga, valor: pago });
     const sheetH = await getSheetHistorico(doc);
-    await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: row.get('Cliente'), Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) }), 4, 'addRow Pagamento Produto');
+    await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: row.get('Cliente'), Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) }), 6, 'addRow Pagamento Produto');
     if (novaQtd === 0) { await row.delete(); return { ok: true, msg: `✅ *${cliente}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.` }; }
     const novoTotal = totalAtual - pago;
     row.set('Quantidade', novaQtd); row.set('Total', novoTotal.toFixed(2)); await row.save();
@@ -175,7 +181,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
     const totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
     if (jid) pushLancamento(jid, { tipo: 'pagamento', cliente, produto: 'geral', quantidade: '-', valor: valorPago });
     const sheetH = await getSheetHistorico(doc);
-    await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2) }), 4, 'addRow Pagamento Valor');
+    await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2) }), 6, 'addRow Pagamento Valor');
     if (valorPago >= totalDevido) {
       for (const r of rowsCliente) await r.delete();
       return { ok: true, msg: `✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.` };
@@ -197,17 +203,19 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
   } catch (err) { console.error('Erro pag valor:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
+// CORRIGIDO: estava chamando getSheetSaldo() sem doc, causando segundo getDoc() desnecessário
 async function gerarRelatorioGeral() {
   try {
-    const sheet = await getSheetSaldo();
+    const doc   = await getDoc();
+    const sheet = await getSheetSaldo(doc);
     const rows  = await sheet.getRows();
     if (!rows.length) return 'Nenhuma dívida em aberto no momento.';
     const clientes = {};
     for (const row of rows) {
-      const nome     = (row.get('Cliente') || '').trim();
-      const produto  = norm(row.get('Produto') || '');
+      const nome       = (row.get('Cliente') || '').trim();
+      const produto    = norm(row.get('Produto') || '');
       const quantidade = parseInt(row.get('Quantidade') || '0');
-      const total    = parseFloat(row.get('Total') || '0');
+      const total      = parseFloat(row.get('Total') || '0');
       if (!nome || !produto) continue;
       if (!clientes[nome]) clientes[nome] = { itens: [], totalDevido: 0 };
       clientes[nome].itens.push({ produto, quantidade, total });
@@ -241,9 +249,9 @@ async function carregarHistoricoAgrupado(filtroMes) {
   if (doc.sheetCount < 2) return { historico: {}, saldos };
   const sheetHist = doc.sheetsByIndex[1];
   try { await sheetHist.loadHeaderRow(); } catch (e) { return { historico: {}, saldos }; }
-  const rowsHist     = await sheetHist.getRows();
+  const rowsHist       = await sheetHist.getRows();
   const nomesCanonicos = [...Object.keys(saldos)];
-  const historico    = {};
+  const historico      = {};
   for (const row of rowsHist) {
     const nomeRaw = (row.get('Cliente') || '').trim();
     if (!nomeRaw) continue;
@@ -264,10 +272,10 @@ async function carregarHistoricoAgrupado(filtroMes) {
     if (!nomeCanon) { nomesCanonicos.push(nomeRaw); nomeCanon = nomeRaw; }
     if (!historico[nomeCanon]) historico[nomeCanon] = [];
     historico[nomeCanon].push({
-      data:    (row.get('Data')      || '').trim(),
-      tipo:    (row.get('Tipo')      || '').trim(),
+      data:    (row.get('Data')       || '').trim(),
+      tipo:    (row.get('Tipo')       || '').trim(),
       produto: norm(row.get('Produto') || ''),
-      qtd:     (row.get('Quantidade')|| '').trim(),
+      qtd:     (row.get('Quantidade') || '').trim(),
       valor:   parseFloat(row.get('Valor') || '0'),
     });
   }
@@ -287,7 +295,7 @@ async function gerarRelatorioDetalhado() {
       const saldoAtual = saldos[nome] || 0;
       resposta += `\n*${nome}*\n`;
       for (const m of movs) {
-        if (m.tipo === 'Compra')    resposta += `  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
+        if (m.tipo === 'Compra')         resposta += `  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         else if (m.tipo === 'Pagamento') resposta += `  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
       }
       resposta += `  *Saldo devedor: R$ ${saldoAtual.toFixed(2)}*\n`;
@@ -311,7 +319,7 @@ async function gerarRelatorioQuitados() {
       const totalPago = movs.filter(m => m.tipo === 'Pagamento').reduce((s, m) => s + m.valor, 0);
       resposta += `\n*${nome}*\n`;
       for (const m of movs) {
-        if (m.tipo === 'Compra')    resposta += `  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
+        if (m.tipo === 'Compra')         resposta += `  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
         else if (m.tipo === 'Pagamento') resposta += `  Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
       }
       resposta += `  ✅ Quitado | Total pago: R$ ${totalPago.toFixed(2)}\n`;
@@ -361,7 +369,7 @@ async function gerarHistoricoCliente(nomeDigitado) {
     let resposta = `*Histórico de ${nomeCanon}*\n───────────────\n`;
     let totalComprado = 0, totalPago = 0;
     for (const m of movs) {
-      if (m.tipo === 'Compra')    { resposta += `Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`; totalComprado += m.valor; }
+      if (m.tipo === 'Compra')         { resposta += `Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`; totalComprado += m.valor; }
       else if (m.tipo === 'Pagamento') { resposta += `Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`; totalPago += m.valor; }
     }
     resposta += `───────────────\nTotal comprado: R$ ${totalComprado.toFixed(2)}\nTotal pago: R$ ${totalPago.toFixed(2)}\n`;
@@ -409,7 +417,9 @@ async function gerarResumoDiario() {
         } else if (m.tipo === 'Pagamento') totalPago += m.valor;
       }
     }
-    const sheetSaldo = await getSheetSaldo();
+    // carregarHistoricoAgrupado já chama getDoc internamente; reusamos o doc dela via getDoc()
+    const doc        = await getDoc();
+    const sheetSaldo = await getSheetSaldo(doc);
     const rows       = await sheetSaldo.getRows();
     const totalAberto = rows.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
     return `*Resumo do Dia - ${hoje}*\n───────────────\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientesSet.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n───────────────\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
@@ -419,7 +429,8 @@ async function gerarResumoDiario() {
 async function verificarLembretes(sock, jid) {
   const { DIAS_LEMBRETE } = require('./config');
   try {
-    const sheet  = await getSheetSaldo();
+    const doc    = await getDoc();
+    const sheet  = await getSheetSaldo(doc);
     const rows   = await sheet.getRows();
     const agora2 = new Date();
     const clientes = {};
@@ -456,7 +467,7 @@ async function zerarCliente(nomeDigitado) {
     const totalZerado = rowsCliente.reduce((s, r) => s + parseFloat(r.get('Total') || '0'), 0);
     for (const r of rowsCliente) await r.delete();
     const sheetH = await getSheetHistorico(doc);
-    await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: nomeCanon, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: totalZerado.toFixed(2) }), 4, 'addRow Zerar');
+    await comRetry(() => sheetH.addRow({ Data: agora(), Cliente: nomeCanon, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: totalZerado.toFixed(2) }), 6, 'addRow Zerar');
     return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
   } catch (err) { console.error('Erro zerar:', err.message); return '❌ Erro ao zerar cliente.'; }
 }
