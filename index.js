@@ -272,15 +272,40 @@ let agendamentosIniciados=false;
 let horaConexao=null;
 let nomeGrupoConectado=null;
 
+// ─── BUG 3 FIX: restaurarSessao com normalização de escapes e log real ────────
+// Problema anterior: CREDS_JSON serializado pelo Render pode conter \\n (escape
+// duplo). JSON.parse lançava exceção silenciada, bot pedia novo pairing sem
+// indicar o motivo real.
+// Correção: normaliza \\n → \n antes do parse; valida o JSON resultante;
+// exibe no console o erro exato caso ainda falhe.
 function restaurarSessao() {
   try {
-    const credsJson=process.env.CREDS_JSON;
-    if(!credsJson) return false;
-    if(!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR,{recursive:true});
-    fs.writeFileSync(path.join(AUTH_DIR,'creds.json'),credsJson,'utf8');
-    console.log('Sessao restaurada do CREDS_JSON');
+    let credsJson = process.env.CREDS_JSON;
+    if (!credsJson) {
+      console.log('[restaurarSessao] CREDS_JSON não definido — será necessário novo pairing.');
+      return false;
+    }
+
+    // Normaliza escapes duplos que o Render pode introduzir na variável de ambiente
+    credsJson = credsJson.replace(/\\\\n/g, '\\n');
+
+    // Valida que é um JSON legítimo antes de gravar no disco
+    try {
+      JSON.parse(credsJson);
+    } catch (parseErr) {
+      console.error('[restaurarSessao] CREDS_JSON inválido — JSON.parse falhou:', parseErr.message);
+      console.error('[restaurarSessao] Primeiros 120 chars do CREDS_JSON:', credsJson.slice(0, 120));
+      return false;
+    }
+
+    if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+    fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
+    console.log('[restaurarSessao] Sessão restaurada com sucesso do CREDS_JSON.');
     return true;
-  } catch(e){console.error('Erro ao restaurar sessao:',e.message);return false;}
+  } catch (e) {
+    console.error('[restaurarSessao] Erro inesperado:', e.message);
+    return false;
+  }
 }
 
 let _ultimoSalvamento = 0;
@@ -916,4 +941,13 @@ async function gerarHistoricoCliente(nomeDigitado) {
       ?`*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*`
       :'\u2705 *Conta quitada!*';
     return resposta;
-  } catch(err){console.error('Erro historico:',err.message);return '\u27
+  } catch(err){console.error('Erro historico:',err.message);return '\u274c Erro ao consultar hist\u00f3rico.';}
+}
+
+// ─── HELPER: getDocComSheets ──────────────────────────────────────────────────
+async function getDocComSheets() {
+  const doc = await getDoc();
+  const sheetSaldo = doc.sheetsByIndex[0];
+  const sheetHistorico = doc.sheetCount >= 2 ? doc.sheetsByIndex[1] : await doc.addSheet({title:'Historico',headerValues:['Data','Cliente','Tipo','Produto','Quantidade','Valor']});
+  return { doc, sheetSaldo, sheetHistorico };
+}
