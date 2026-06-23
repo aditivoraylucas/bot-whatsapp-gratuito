@@ -21,12 +21,9 @@ const SPREADSHEET_ID =
   _rawUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)?.[1] ||
   _rawUrl.trim();
 
-// ─── DEBUG startup ────────────────────────────────────────────────────────────
-console.log('[config] SPREADSHEET_RAW:', _rawUrl || '❌ INDEFINIDO');
-console.log('[config] SPREADSHEET_ID extraído:', SPREADSHEET_ID || '❌ VAZIO');
-console.log('[config] SERVICE_ACCOUNT:', GOOGLE_SERVICE_ACCOUNT_EMAIL || '❌ INDEFINIDO');
-console.log('[config] PRIVATE_KEY ok:', GOOGLE_PRIVATE_KEY ? '✅' : '❌ INDEFINIDA');
-console.log('[config] ENV_VARS_COUNT:', Object.keys(process.env).length);
+if (!SPREADSHEET_ID)  console.warn('[config] ⚠️  SPREADSHEET_ID não configurado');
+if (!GOOGLE_SERVICE_ACCOUNT_EMAIL) console.warn('[config] ⚠️  GOOGLE_SERVICE_ACCOUNT_EMAIL não configurado');
+if (!GOOGLE_PRIVATE_KEY)           console.warn('[config] ⚠️  GOOGLE_PRIVATE_KEY não configurada');
 
 module.exports = {
   GRUPO_NOME, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY,
