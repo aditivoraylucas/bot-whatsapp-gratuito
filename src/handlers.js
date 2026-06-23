@@ -136,6 +136,7 @@ const KW_METODO = {
   'vista':    'Dinheiro',
   'pago':     '',
   'paga':     '',
+  'pagou':    '',
 };
 
 function extrairMetodo(texto) {
@@ -148,48 +149,61 @@ function extrairMetodo(texto) {
 
 /**
  * Detecta frases do tipo:
- *   "Calor 2 trufas pago pix"
- *   "Raylucas 1 bombom pago dinheiro"
- *   "Ana 3 trufas pago"
+ *   "Lucas 2 trufas pago pix"
  *   "Lucas uma trufa e um bombom pago no pix"
+ *   "Lucas uma trufa e um bombom pagou no pix"   ← NOVO
+ *   "Lucas pegou 1 bombom e pagou no dinheiro"   ← NOVO
+ *   "Lucas comprou 2 trufas e pagou dinheiro"     ← NOVO
  *
+ * Regra: há produto na frase + há indicação de quitação (KW_VISTA ou pagou/pagou).
  * Retorna { nome, itens, metodo } com itens agrupados por produto, ou null.
  */
 function parsearVendaVista(linha) {
   const tNorm = norm(linha);
 
-  // Se contiver keyword de pagamento de dívida (sem "pago"), não é venda à vista.
-  // "pago" foi removido do CORRECOES_VOZ para não virar "pagou" antes de chegar aqui.
-  const kwDivida = /\b(pagou|transferiu|depositou|mandou|enviou)\b/;
-  if (kwDivida.test(tNorm)) return null;
+  // Verifica se há pelo menos um produto reconhecível na frase
+  const temProduto = tNorm.split(/\s+/).some(p => !!toProduto(p));
 
-  // Deve conter ao menos uma KW_VISTA
-  const temVista = [...KW_VISTA].some(kw => {
-    const re = new RegExp(`\\b${kw}\\b`);
-    return re.test(tNorm);
-  });
-  if (!temVista) return null;
+  // Verifica se há indicação de quitação imediata:
+  // KW_VISTA (pago, pix, dinheiro...) OU verbos pagou/pagou quando há produto
+  const temKwVista = [...KW_VISTA].some(kw => new RegExp(`\\b${kw}\\b`).test(tNorm));
+  const temPagouComProduto = /\b(pagou|paga)\b/.test(tNorm) && temProduto;
+
+  if (!temKwVista && !temPagouComProduto) return null;
+
+  // Pagamento de dívida puro: "Lucas pagou 10" ou "Lucas pagou 2 trufas" (sem KW_VISTA)
+  // Se "pagou" está presente MAS não há KW_VISTA, só aceita como à vista se tiver produto
+  if (!temKwVista && temPagouComProduto) {
+    // Se vier valor numérico sem produto, é pagamento de dívida — deixa para parsearPagamento
+    const possPagDivida = /\b(pagou|paga)\b.*\b\d+([,.]\d+)?\b/.test(tNorm) && !temProduto;
+    if (possPagDivida) return null;
+  }
+
+  // Verbos de ação de compra que devem ser removidos da frase antes de parsear
+  const KW_VERBOS_COMPRA = /\b(pegou|comprou|levou|tomou|quer|quero|queria)\b/g;
 
   // Extrai o método antes de limpar a linha
   const metodo = extrairMetodo(linha);
 
-  // Remove as KW_VISTA e palavras de preposição ("no", "na", "em") da linha
+  // Limpa: remove KW_VISTA, pagou/paga, verbos de compra e preposições soltas
   let linhaLimpa = tNorm;
   for (const kw of KW_VISTA) {
     linhaLimpa = linhaLimpa.replace(new RegExp(`\\b${kw}\\b`, 'g'), ' ');
   }
-  // Remove preposições soltas que ficam após remover "pix", "pago", etc.
-  linhaLimpa = linhaLimpa.replace(/\b(no|na|em|pelo|pela)\b/g, ' ');
-  linhaLimpa = linhaLimpa.replace(/\s+/g, ' ').trim();
+  linhaLimpa = linhaLimpa
+    .replace(/\b(pagou|paga)\b/g, ' ')
+    .replace(KW_VERBOS_COMPRA, ' ')
+    .replace(/\b(no|na|em|pelo|pela)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
   const resultado = parsearLinha(linhaLimpa);
   if (!resultado) return null;
 
-  // ── Agrupa itens com o mesmo produto (evita duplicatas por sinônimos) ──
+  // Agrupa itens com o mesmo produto (evita duplicatas por sinônimos)
   const mapa = new Map();
   for (const item of resultado.itens) {
-    const qtdAtual = mapa.get(item.produto) || 0;
-    mapa.set(item.produto, qtdAtual + item.quantidade);
+    mapa.set(item.produto, (mapa.get(item.produto) || 0) + item.quantidade);
   }
   const itensAgrupados = [...mapa.entries()].map(([produto, quantidade]) => ({ produto, quantidade }));
 
@@ -271,7 +285,7 @@ function mensagemAjuda() {
   return [
     '*Bot de Vendas 🥇*','───────────────',
     '*Registrar compra (fiado):*','  `julia 2 trufas`','  `carlos 1 bolo 3 trufas`','',
-    '*Venda à vista (pago na hora):*','  `julia 2 trufas pago`','  `carlos 1 bolo pago pix`','  `ana 3 trufas pago dinheiro`','',
+    '*Venda à vista (pago na hora):*','  `julia 2 trufas pago`','  `carlos 1 bolo pago pix`','  `ana 3 trufas pago dinheiro`','  `ana pegou 2 trufas e pagou pix`','',
     '*Registrar pagamento de dívida:*','  `julia pagou 10`','  `carlos pix 15`','  `ana pagou 2 trufas`','',
     '*Relatórios:*','  `relatorio` — geral','  `relatorio detalhado`','  `relatorio quitados`','  `relatorio junho`','  `resumo` — resumo do dia','',
     '*Consultas:*','  `saldo julia`','  `historico carlos`','',
