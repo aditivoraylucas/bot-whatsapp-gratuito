@@ -26,6 +26,33 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
+// ── Helper: busca env-vars atuais do Render com segurança ───────────────────────────
+async function buscarEnvVarsRender() {
+  const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+    headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
+  });
+  if (!resGet.ok) throw new Error(`Render GET env-vars falhou: ${resGet.status}`);
+  const envVars   = await resGet.json();
+  const lista = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
+  // PROTEÇÃO: nunca continuar se a lista vier vazia (indica erro na API)
+  if (lista.length === 0) throw new Error('Render retornou lista de env-vars vazia — abortando para não apagar variáveis.');
+  return lista;
+}
+
+async function putEnvVarsRender(novas) {
+  // PROTEÇÃO: nunca enviar lista com menos de 3 variáveis (evita apagar tudo)
+  if (novas.length < 3) {
+    throw new Error(`putEnvVarsRender abortado: apenas ${novas.length} variável(is) na lista — risco de apagar tudo.`);
+  }
+  const resPut = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(novas),
+  });
+  if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 200)}`);
+  return resPut;
+}
+
 // ── Limpa sessão corrompida (401 / loggedOut) ───────────────────────────────
 function limparSessaoLocal() {
   try {
@@ -39,24 +66,16 @@ function limparSessaoLocal() {
 async function limparSessaoNoRender() {
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
-    const resGet  = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
-      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
-    });
-    const envVars   = await resGet.json();
-    const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
+    const existente = await buscarEnvVarsRender();
     const novas = existente
       .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
       .map(v => ({ key: v.key, value: v.value }));
-    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(novas),
-    });
+    await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON inválido removido da Render API.');
-  } catch (e) { console.error('Erro ao limpar CREDS_JSON no Render:', e.message); }
+  } catch (e) { console.error('Erro ao limpar CREDS_JSON no Render (seguro — nada apagado):', e.message); }
 }
 
-// ── Sessão persistente ─────────────────────────────────────────────────────���───────────
+// ── Sessão persistente ─────────────────────────────────────────────────────────────
 function restaurarSessao() {
   try {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
@@ -90,44 +109,23 @@ async function salvarSessaoNoRender() {
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     if (conteudo === process.env.CREDS_JSON) return;
 
-    const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
-      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
-    });
-    if (!resGet.ok) {
-      const txt = await resGet.text();
-      console.error(`[sessão] Erro ao buscar env-vars (${resGet.status}):`, txt.slice(0, 200));
-      return;
-    }
-    const envVars   = await resGet.json();
-    const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
-
+    const existente = await buscarEnvVarsRender();
     const novas = [
       ...existente
         .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
         .map(v => ({ key: v.key, value: v.value })),
       { key: 'CREDS_JSON', value: conteudo },
     ];
-
-    const resPut = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify(novas),
-    });
-    if (!resPut.ok) {
-      const txt = await resPut.text();
-      console.error(`[sessão] Erro ao salvar CREDS_JSON (${resPut.status}):`, txt.slice(0, 200));
-      return;
-    }
+    await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON atualizado na Render API (será usado no próximo deploy).');
-  } catch (e) { console.error('Erro ao salvar sessao na Render API:', e.message); }
+  } catch (e) { console.error('Erro ao salvar sessao na Render API (seguro — nada apagado):', e.message); }
 }
 
 // ── Determina se o disconnect exige limpeza total de sessão ─────────────────────────
-// Cobre: logout explícito (401), stream error (515), Bad MAC / sessão corrompida
 function precisaLimparSessao(statusCode, errorMessage) {
-  if (statusCode === DisconnectReason.loggedOut)    return true; // 401 - desconectado pelo telefone
+  if (statusCode === DisconnectReason.loggedOut)           return true; // 401
   if (statusCode === DisconnectReason.multideviceMismatch) return true; // 411
-  if (statusCode === 515) return true; // Stream error — sessão válida mas stream reiniciado pelo WA
+  if (statusCode === 515) return true;
   if (errorMessage && (
     errorMessage.includes('Bad MAC') ||
     errorMessage.includes('bad mac') ||
@@ -205,20 +203,18 @@ async function iniciarBot() {
 
       const statusCode   = lastDisconnect?.error?.output?.statusCode;
       const errorMessage = lastDisconnect?.error?.message || '';
-      const deveLinpar   = precisaLimparSessao(statusCode, errorMessage);
+      const deveLimpar   = precisaLimparSessao(statusCode, errorMessage);
 
-      console.log(`[conexão] Fechada — código: ${statusCode} | msg: ${errorMessage.slice(0, 80)} | limpar: ${deveLinpar}`);
+      console.log(`[conexão] Fechada — código: ${statusCode} | msg: ${errorMessage.slice(0, 80)} | limpar: ${deveLimpar}`);
 
-      if (deveLinpar) {
-        console.log('[sessão] Sessão inválida detectada. Limpando credenciais e aguardando novo pairing...');
+      if (deveLimpar) {
+        console.log('[sessão] Sessão inválida detectada. Limpando credenciais...');
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
-        // Aguarda 5s antes de reiniciar para garantir que o Render não salve o CREDS_JSON antigo
         setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
-        // Backoff exponencial: 5s, 10s, 20s, 30s (máx)
         const delay = Math.min(5000 * tentativasReconexao, 30000);
         console.log(`[reconexão] Tentativa ${tentativasReconexao} em ${delay / 1000}s...`);
         setTimeout(iniciarBot, delay);
