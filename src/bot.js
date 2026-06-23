@@ -26,30 +26,43 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Helper: busca env-vars atuais do Render com segurança ───────────────────────────
+// ── Helper: normaliza o array de env-vars da Render API ─────────────────────────────
+// A Render API v1 retorna [{envVar:{key,value}}, ...] ou [{key,value}, ...]
+// dependendo da versão. Esta função normaliza os dois formatos.
+function normalizarEnvVars(raw) {
+  if (!Array.isArray(raw)) {
+    // Pode vir como { envVars: [...] }
+    raw = raw?.envVars || [];
+  }
+  return raw.map(item => {
+    // Formato novo: { envVar: { key, value } }
+    if (item.envVar) return { key: item.envVar.key, value: item.envVar.value };
+    // Formato antigo: { key, value }
+    return { key: item.key, value: item.value };
+  }).filter(v => v.key && v.key.trim() !== '');
+}
+
 async function buscarEnvVarsRender() {
   const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
     headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
   });
   if (!resGet.ok) throw new Error(`Render GET env-vars falhou: ${resGet.status}`);
-  const envVars   = await resGet.json();
-  const lista = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
-  // PROTEÇÃO: nunca continuar se a lista vier vazia (indica erro na API)
-  if (lista.length === 0) throw new Error('Render retornou lista de env-vars vazia — abortando para não apagar variáveis.');
+  const raw   = await resGet.json();
+  console.log('[Render API] raw env-vars sample:', JSON.stringify(raw).slice(0, 200));
+  const lista = normalizarEnvVars(raw);
+  console.log(`[Render API] ${lista.length} env-vars encontradas.`);
   return lista;
 }
 
 async function putEnvVarsRender(novas) {
-  // PROTEÇÃO: nunca enviar lista com menos de 3 variáveis (evita apagar tudo)
-  if (novas.length < 3) {
-    throw new Error(`putEnvVarsRender abortado: apenas ${novas.length} variável(is) na lista — risco de apagar tudo.`);
-  }
+  // Converte para o formato que a Render API espera no PUT
+  const payload = novas.map(v => ({ key: v.key, value: v.value }));
   const resPut = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
     method: 'PUT',
     headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(novas),
+    body: JSON.stringify(payload),
   });
-  if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 200)}`);
+  if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
   return resPut;
 }
 
@@ -58,7 +71,7 @@ function limparSessaoLocal() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-      console.log('[sessão] Pasta auth_info removida (sessão inválida).');
+      console.log('[sessão] Pasta auth_info removida.');
     }
   } catch (e) { console.error('Erro ao limpar sessão local:', e.message); }
 }
@@ -67,12 +80,10 @@ async function limparSessaoNoRender() {
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
     const existente = await buscarEnvVarsRender();
-    const novas = existente
-      .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
-      .map(v => ({ key: v.key, value: v.value }));
+    const novas = existente.filter(v => v.key !== 'CREDS_JSON');
     await putEnvVarsRender(novas);
-    console.log('[sessão] CREDS_JSON inválido removido da Render API.');
-  } catch (e) { console.error('Erro ao limpar CREDS_JSON no Render (seguro — nada apagado):', e.message); }
+    console.log('[sessão] CREDS_JSON removido da Render API.');
+  } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
 // ── Sessão persistente ─────────────────────────────────────────────────────────────
@@ -98,27 +109,22 @@ function restaurarSessao() {
 async function salvarSessaoNoRender() {
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
-      console.warn('[sessão] RENDER_API_KEY ou RENDER_SERVICE_ID não definidos — sessão não será salva.');
+      console.warn('[sessão] RENDER_API_KEY ou RENDER_SERVICE_ID não definidos.');
       return;
     }
     const credsPath = path.join(AUTH_DIR, 'creds.json');
-    if (!fs.existsSync(credsPath)) {
-      console.warn('[sessão] creds.json não encontrado — nada a salvar.');
-      return;
-    }
+    if (!fs.existsSync(credsPath)) { console.warn('[sessão] creds.json não encontrado.'); return; }
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     if (conteudo === process.env.CREDS_JSON) return;
 
     const existente = await buscarEnvVarsRender();
     const novas = [
-      ...existente
-        .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
-        .map(v => ({ key: v.key, value: v.value })),
+      ...existente.filter(v => v.key !== 'CREDS_JSON'),
       { key: 'CREDS_JSON', value: conteudo },
     ];
     await putEnvVarsRender(novas);
-    console.log('[sessão] CREDS_JSON atualizado na Render API (será usado no próximo deploy).');
-  } catch (e) { console.error('Erro ao salvar sessao na Render API (seguro — nada apagado):', e.message); }
+    console.log('[sessão] CREDS_JSON atualizado na Render API.');
+  } catch (e) { console.error('[sessão] Erro ao salvar sessao:', e.message); }
 }
 
 // ── Determina se o disconnect exige limpeza total de sessão ─────────────────────────
@@ -130,7 +136,6 @@ function precisaLimparSessao(statusCode, errorMessage) {
     errorMessage.includes('Bad MAC') ||
     errorMessage.includes('bad mac') ||
     errorMessage.includes('Failed to decrypt') ||
-    errorMessage.includes('invalid') ||
     errorMessage.includes('401')
   )) return true;
   return false;
@@ -208,7 +213,7 @@ async function iniciarBot() {
       console.log(`[conexão] Fechada — código: ${statusCode} | msg: ${errorMessage.slice(0, 80)} | limpar: ${deveLimpar}`);
 
       if (deveLimpar) {
-        console.log('[sessão] Sessão inválida detectada. Limpando credenciais...');
+        console.log('[sessão] Limpando credenciais inválidas...');
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
