@@ -75,12 +75,14 @@ async function limparSessaoNoRender() {
     const novas = existente.filter(v => v.key !== 'CREDS_JSON');
     await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON removido da Render API.');
+    // Invalida também o process.env local para não reutilizar na mesma instância
     delete process.env.CREDS_JSON;
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
 // ── Sessão persistente ──────────────────────────────────────────────────────────────────
 function restaurarSessao() {
+  // Se a sessão foi invalidada por logout, não restaura — aguarda novo pairing
   if (sessaoInvalidada) {
     console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
     return false;
@@ -116,14 +118,15 @@ async function salvarSessaoNoRender() {
       { key: 'CREDS_JSON', value: conteudo },
     ];
     await putEnvVarsRender(novas);
-    process.env.CREDS_JSON = conteudo;
+    process.env.CREDS_JSON = conteudo; // atualiza local também
     console.log('[sessão] CREDS_JSON atualizado na Render API.');
   } catch (e) { console.error('[sessão] Erro ao salvar sessao:', e.message); }
 }
 
+// ── Determina se o disconnect exige limpeza total de sessão ──────────────────────────
 function precisaLimparSessao(statusCode, errorMessage) {
-  if (statusCode === DisconnectReason.loggedOut)           return true;
-  if (statusCode === DisconnectReason.multideviceMismatch) return true;
+  if (statusCode === DisconnectReason.loggedOut)           return true; // 401
+  if (statusCode === DisconnectReason.multideviceMismatch) return true; // 411
   if (errorMessage && (
     errorMessage.includes('Bad MAC') ||
     errorMessage.includes('bad mac') ||
@@ -132,7 +135,9 @@ function precisaLimparSessao(statusCode, errorMessage) {
   return false;
 }
 
+// ── iniciarBot ────────────────────────────────────────────────────────────────────
 async function iniciarBot() {
+  // Se sessão invalidada, apenas inicializa sem credenciais (aguarda pairing)
   if (!sessaoInvalidada) {
     restaurarSessao();
   }
@@ -172,7 +177,7 @@ async function iniciarBot() {
     if (connection === 'open') {
       botConectado        = true;
       pairingPendente     = false;
-      sessaoInvalidada    = false;
+      sessaoInvalidada    = false; // conexão bem-sucedida: libera restauração futura
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
@@ -211,8 +216,10 @@ async function iniciarBot() {
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
+        // Marca sessão como invalidada: não tenta restaurar do CREDS_JSON
         sessaoInvalidada = true;
         console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento pelo formulário web...');
+        // Reinicia sem credenciais para ficar pronto para receber pairing code
         setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
@@ -237,6 +244,7 @@ async function iniciarBot() {
         if (!norm(nomeGrupo).includes(norm(GRUPO_NOME))) continue;
         jidGrupoGlobal = jid;
 
+        // ── Áudio ──
         const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {
           try {
@@ -253,6 +261,7 @@ async function iniciarBot() {
           continue;
         }
 
+        // ── Texto ──
         const textMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
         if (!textMsg.trim()) continue;
         const resposta = await processarTexto(textMsg, jid, sock);

@@ -1,12 +1,4 @@
-// ─── HANDLERS DE MENSAGENS ──────────────────────────────────────────────────────────────
-// ÂNCORAS:
-//   [ANCHOR:CORRECOES-VOZ]  — dicionário de correções de transcrição
-//   [ANCHOR:TRANSCRICAO]    — transcrição de áudio via Groq Whisper
-//   [ANCHOR:PARSER-COMPRA]  — parsearLinha() e parsearPagamento()
-//   [ANCHOR:CMDS-PRODUTO]   — mudarPreco, cadastrarNovoProduto, listarProdutos
-//   [ANCHOR:AJUDA]          — mensagemAjuda()
-//   [ANCHOR:PROCESSADOR]    — processarTexto() principal
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────────────
 const FormData = require('form-data');
 const { GROQ_API_KEY, LIMITE_CREDITO_PADRAO } = require('./config');
 const {
@@ -24,7 +16,7 @@ const {
   gerarResumoDiario, zerarCliente,
 } = require('./sheets');
 
-// ── [ANCHOR:CORRECOES-VOZ] Dicionário de correções de transcrição ─────────────
+// ── Correções de transcrição de voz ──────────────────────────────────────────
 const CORRECOES_VOZ = {
   'saudo':'saldo','saud':'saldo','salvo':'saldo','salda':'saldo','saldos':'saldo',
   'relatorios':'relatorio','relato':'relatorio',
@@ -53,13 +45,13 @@ function corrigirTranscricao(texto) {
   return texto.split(/\s+/).map(p => corrigirPalavra(p)).join(' ');
 }
 
-// ── [ANCHOR:TRANSCRICAO] Transcrição de áudio via Groq Whisper ─────────────
+// ── Transcrição de áudio via Groq Whisper ─────────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
   try {
-    // usa fetch nativo do Node 18+ (não precisa de node-fetch)
-    const ext  = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
-    const form = new FormData();
+    const fetch = (await import('node-fetch')).default;
+    const ext   = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
+    const form  = new FormData();
     form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
@@ -77,12 +69,13 @@ async function transcreverAudio(audioBuffer, mimeType) {
       headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
       body: form,
     });
-    if (!res.ok) { console.error('Groq erro:', await res.text()); return null; }
-    return (await res.json()).text?.trim() || null;
+    if (!res.ok) { const err = await res.text(); console.error('Groq erro:', err); return null; }
+    const data = await res.json();
+    return data.text?.trim() || null;
   } catch (e) { console.error('Erro transcrição Groq:', e.message); return null; }
 }
 
-// ── [ANCHOR:PARSER-COMPRA] Parsers de compra e pagamento ─────────────────
+// ── Parser de compra ──────────────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -156,7 +149,7 @@ function parsearPagamento(linha) {
   return null;
 }
 
-// ── [ANCHOR:CMDS-PRODUTO] Comandos de produto/preço ──────────────────────
+// ── Comandos de produto/preço ─────────────────────────────────────────────────
 function mudarPreco(produto, novoPreco) {
   const p = toProduto(produto);
   if (!p) return `❌ Produto *${produto}* não encontrado.`;
@@ -165,6 +158,7 @@ function mudarPreco(produto, novoPreco) {
   salvarPrecos();
   return `✅ Preço de *${nomeProdutoExib(p)}* atualizado: R$ ${precoAntigo.toFixed(2)} → R$ ${novoPreco.toFixed(2)}\n_Saldos existentes não foram alterados. Vale para novas compras._`;
 }
+
 function cadastrarNovoProduto(nomeProduto, preco) {
   const key = norm(nomeProduto).replace(/\s+/g, '_');
   if (PRECOS[key] !== undefined) return `⚠️ Produto *${nomeProduto}* já existe. Para mudar o preço: _preco ${nomeProduto} R$XX_`;
@@ -174,17 +168,19 @@ function cadastrarNovoProduto(nomeProduto, preco) {
   salvarSinonimosExtra();
   return `✅ Novo produto cadastrado!\n*${capitalizarNome(nomeProduto)}* = R$ ${preco.toFixed(2)}\nUso: _"cliente nome ${norm(nomeProduto)}"_`;
 }
+
 function listarProdutos() {
   const todos = todosOsSinonimos();
   let msg = '*Produtos cadastrados*\n───────────────\n';
   for (const [key] of Object.entries(todos)) {
-    if (PRECOS[key] === undefined) continue;
-    msg += `${nomeProdutoExib(key)}: R$ ${PRECOS[key].toFixed(2)}\n`;
+    const preco = PRECOS[key];
+    if (preco === undefined) continue;
+    msg += `${nomeProdutoExib(key)}: R$ ${preco.toFixed(2)}\n`;
   }
-  return msg + '───────────────\n_Para mudar o preço: preco [produto] [valor]_';
+  msg += '───────────────\n_Para mudar o preço: preco [produto] [valor]_';
+  return msg;
 }
 
-// ── [ANCHOR:AJUDA] mensagemAjuda ────────────────────────────────────────────
 function mensagemAjuda() {
   return [
     '*Bot de Vendas 🥇*','───────────────',
@@ -201,7 +197,7 @@ function mensagemAjuda() {
   ].join('\n');
 }
 
-// ── [ANCHOR:PROCESSADOR] processarTexto principal ────────────────────────
+// ── Processador principal de texto ───────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
   if (!texto) return null;
   const t        = norm(texto);
@@ -209,9 +205,9 @@ async function processarTexto(texto, jid, sock) {
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
   if (p0 === 'relatorio' || p0 === 'relatorios') {
-    if (p1 === 'detalhado')                    return await gerarRelatorioDetalhado();
+    if (p1 === 'detalhado')                   return await gerarRelatorioDetalhado();
     if (p1 === 'quitados' || p1 === 'quitado') return await gerarRelatorioQuitados();
-    if (p1 && isMes(p1))                       return await gerarRelatorioMes(p1);
+    if (p1 && isMes(p1))                      return await gerarRelatorioMes(p1);
     return await gerarRelatorioGeral();
   }
   if (p0 === 'resumo')               return await gerarResumoDiario();
@@ -223,9 +219,9 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'produtos')             return listarProdutos();
 
   if (p0 === 'preco' && p1) {
-    const prodTrecho    = palavras.slice(1, -1).join(' ');
+    const prodTrecho   = palavras.slice(1, -1).join(' ');
     const ultimaPalavra = palavras[palavras.length - 1];
-    const novoPreco     = extrairValor(ultimaPalavra);
+    const novoPreco    = extrairValor(ultimaPalavra);
     if (novoPreco && novoPreco > 0) return mudarPreco(prodTrecho, novoPreco);
     const prodTudo = palavras.slice(1).join(' ');
     const v2       = extrairValor(prodTudo);
@@ -233,12 +229,10 @@ async function processarTexto(texto, jid, sock) {
   }
 
   if (p0 === 'novo' && p1) {
-    const partes = palavras.slice(1);
-    const preco  = extrairValor(partes[partes.length - 1]);
-    if (preco && preco > 0) {
-      const nomeProd = partes.slice(0, -1).join(' ').trim();
-      if (nomeProd) return cadastrarNovoProduto(nomeProd, preco);
-    }
+    const partes  = palavras.slice(1);
+    const ultimaP = partes[partes.length - 1];
+    const preco   = extrairValor(ultimaP);
+    if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
   const pag = parsearPagamento(texto);
