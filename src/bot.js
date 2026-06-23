@@ -1,12 +1,4 @@
-// ─── LÓGICA DO WHATSAPP / BAILEYS ────────────────────────────────────────────
-// ÂNCORAS:
-//   [ANCHOR:ESTADO]        — variáveis de estado compartilhado
-//   [ANCHOR:RENDER-API]    — helpers para Render env-vars
-//   [ANCHOR:SESSAO]        — salvar/restaurar/limpar credenciais
-//   [ANCHOR:RECONEXAO]     — lógica de disconnect e reconnect
-//   [ANCHOR:AGENDAMENTOS]  — lembretes e resumo diário
-//   [ANCHOR:MENSAGENS]     — handler de messages.upsert
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── LÓGICA DO WHATSAPP / BAILEYS ──────────────────────────────────────────────
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const fs   = require('fs');
 const path = require('path');
@@ -17,7 +9,7 @@ const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── [ANCHOR:ESTADO] Estado compartilhado ─────────────────────────────────────
+// ── Estado compartilhado ────────────────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -27,7 +19,9 @@ let ultimoDiaResumo       = '';
 let pairingPendente       = false;
 let pairingNumero         = '';
 let tentativasReconexao   = 0;
-let sessaoInvalidada      = false; // true após loggedOut — só novo pairing resolve
+
+// Flag que impede restaurar sessão após loggedOut — só novo pairing resolve
+let sessaoInvalidada = false;
 
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
@@ -35,73 +29,80 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── [ANCHOR:RENDER-API] Helpers Render env-vars ───────────────────────────────
+// ── Helper: normaliza o array de env-vars da Render API ─────────────────────────
 function normalizarEnvVars(raw) {
   if (!Array.isArray(raw)) raw = raw?.envVars || [];
   return raw
     .map(item => item.envVar ? { key: item.envVar.key, value: item.envVar.value } : { key: item.key, value: item.value })
     .filter(v => v.key && v.key.trim() !== '');
 }
+
 async function buscarEnvVarsRender() {
   const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
     headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
   });
   if (!resGet.ok) throw new Error(`Render GET env-vars falhou: ${resGet.status}`);
-  const lista = normalizarEnvVars(await resGet.json());
+  const raw   = await resGet.json();
+  const lista = normalizarEnvVars(raw);
   console.log(`[Render API] ${lista.length} env-vars encontradas.`);
   return lista;
 }
+
 async function putEnvVarsRender(novas) {
+  const payload = novas.map(v => ({ key: v.key, value: v.value }));
   const resPut = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
     method: 'PUT',
     headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(novas.map(v => ({ key: v.key, value: v.value }))),
+    body: JSON.stringify(payload),
   });
   if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
 }
 
-// ── [ANCHOR:SESSAO] Persistência de credenciais ───────────────────────────────
-function isJsonValido(str) {
-  if (!str || typeof str !== 'string' || str.trim() === '') return false;
-  try { JSON.parse(str); return true; } catch { return false; }
-}
+// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────────
 function limparSessaoLocal() {
   try {
-    if (fs.existsSync(AUTH_DIR)) { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); console.log('[sessão] Pasta auth_info removida.'); }
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      console.log('[sessão] Pasta auth_info removida.');
+    }
   } catch (e) { console.error('Erro ao limpar sessão local:', e.message); }
 }
+
 async function limparSessaoNoRender() {
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
     const existente = await buscarEnvVarsRender();
-    await putEnvVarsRender(existente.filter(v => v.key !== 'CREDS_JSON'));
+    const novas = existente.filter(v => v.key !== 'CREDS_JSON');
+    await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON removido da Render API.');
     delete process.env.CREDS_JSON;
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
+
+// ── Sessão persistente ──────────────────────────────────────────────────────────────────
 function restaurarSessao() {
-  if (sessaoInvalidada) { console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.'); return false; }
+  if (sessaoInvalidada) {
+    console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
+    return false;
+  }
   try {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (fs.existsSync(credsPath)) {
-      const conteudoLocal = fs.readFileSync(credsPath, 'utf8');
-      if (!isJsonValido(conteudoLocal)) {
-        console.warn('[restaurarSessao] creds.json local inválido — descartando.');
-        fs.unlinkSync(credsPath);
-      } else {
-        console.log('[restaurarSessao] Usando creds.json local existente.');
-        return true;
-      }
+      console.log('[restaurarSessao] Usando creds.json local existente.');
+      return true;
     }
     const credsJson = process.env.CREDS_JSON;
-    if (!credsJson) { console.log('[restaurarSessao] CREDS_JSON não definido — necessário novo pairing.'); return false; }
-    if (!isJsonValido(credsJson)) { console.warn('[restaurarSessao] CREDS_JSON inválido — ignorando.'); delete process.env.CREDS_JSON; return false; }
+    if (!credsJson) {
+      console.log('[restaurarSessao] CREDS_JSON não definido – será necessário novo pairing.');
+      return false;
+    }
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-    fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), credsJson, 'utf8');
-    console.log('[restaurarSessao] Sessão restaurada do CREDS_JSON.');
+    fs.writeFileSync(credsPath, credsJson, 'utf8');
+    console.log('[restaurarSessao] Sessao restaurada do CREDS_JSON.');
     return true;
-  } catch (e) { console.error('Erro ao restaurar sessão:', e.message); return false; }
+  } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
 }
+
 async function salvarSessaoNoRender() {
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
@@ -110,41 +111,31 @@ async function salvarSessaoNoRender() {
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     if (conteudo === process.env.CREDS_JSON) return;
     const existente = await buscarEnvVarsRender();
-    await putEnvVarsRender([...existente.filter(v => v.key !== 'CREDS_JSON'), { key: 'CREDS_JSON', value: conteudo }]);
+    const novas = [
+      ...existente.filter(v => v.key !== 'CREDS_JSON'),
+      { key: 'CREDS_JSON', value: conteudo },
+    ];
+    await putEnvVarsRender(novas);
     process.env.CREDS_JSON = conteudo;
     console.log('[sessão] CREDS_JSON atualizado na Render API.');
-  } catch (e) { console.error('[sessão] Erro ao salvar sessão:', e.message); }
+  } catch (e) { console.error('[sessão] Erro ao salvar sessao:', e.message); }
 }
 
-// ── [ANCHOR:RECONEXAO] Lógica de disconnect ───────────────────────────────────
 function precisaLimparSessao(statusCode, errorMessage) {
   if (statusCode === DisconnectReason.loggedOut)           return true;
   if (statusCode === DisconnectReason.multideviceMismatch) return true;
-  if (errorMessage && (errorMessage.includes('Bad MAC') || errorMessage.includes('bad mac') || errorMessage.includes('Failed to decrypt'))) return true;
+  if (errorMessage && (
+    errorMessage.includes('Bad MAC') ||
+    errorMessage.includes('bad mac') ||
+    errorMessage.includes('Failed to decrypt')
+  )) return true;
   return false;
 }
 
-// ── [ANCHOR:AGENDAMENTOS] Lembretes e resumo diário ──────────────────────────
-function iniciarAgendamentos(sock) {
-  setInterval(async () => {
-    try {
-      const horaNum = horaAtualSP();
-      const hoje    = agoraData();
-      if (horaNum === HORA_LEMBRETE && ultimoDiaLembrete !== hoje && jidGrupoGlobal) {
-        ultimoDiaLembrete = hoje;
-        await verificarLembretes(sock, jidGrupoGlobal);
-      }
-      if (horaNum === HORA_RESUMO && ultimoDiaResumo !== hoje && jidGrupoGlobal) {
-        ultimoDiaResumo = hoje;
-        await sock.sendMessage(jidGrupoGlobal, { text: await gerarResumoDiario() });
-      }
-    } catch (e) { console.error('Erro agendamento:', e.message); }
-  }, 60 * 60 * 1000);
-}
-
-// ── [ANCHOR:MENSAGENS] iniciarBot ─────────────────────────────────────────────
 async function iniciarBot() {
-  if (!sessaoInvalidada) restaurarSessao();
+  if (!sessaoInvalidada) {
+    restaurarSessao();
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version }          = await fetchLatestBaileysVersion();
@@ -165,11 +156,18 @@ async function iniciarBot() {
   });
 
   sockGlobal = sock;
-  sock.ev.on('creds.update', async () => { await saveCreds(); await salvarSessaoNoRender(); });
+
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    await salvarSessaoNoRender();
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
-    if (update.qr) console.log('QR disponível (use o formulário web para parear por número)');
+
+    if (update.qr) {
+      console.log('QR disponível (use o formulário web para parear por número)');
+    }
 
     if (connection === 'open') {
       botConectado        = true;
@@ -178,23 +176,43 @@ async function iniciarBot() {
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
-      if (!agendamentosIniciados) { agendamentosIniciados = true; iniciarAgendamentos(sock); }
+
+      if (!agendamentosIniciados) {
+        agendamentosIniciados = true;
+        setInterval(async () => {
+          try {
+            const horaNum = horaAtualSP();
+            const hoje    = agoraData();
+            if (horaNum === HORA_LEMBRETE && ultimoDiaLembrete !== hoje && jidGrupoGlobal) {
+              ultimoDiaLembrete = hoje;
+              await verificarLembretes(sock, jidGrupoGlobal);
+            }
+            if (horaNum === HORA_RESUMO && ultimoDiaResumo !== hoje && jidGrupoGlobal) {
+              ultimoDiaResumo = hoje;
+              await sock.sendMessage(jidGrupoGlobal, { text: await gerarResumoDiario() });
+            }
+          } catch (e) { console.error('Erro agendamento:', e.message); }
+        }, 60 * 60 * 1000);
+      }
     }
 
     if (connection === 'close') {
       botConectado          = false;
       agendamentosIniciados = false;
+
       const statusCode   = lastDisconnect?.error?.output?.statusCode;
       const errorMessage = lastDisconnect?.error?.message || '';
       const deveLimpar   = precisaLimparSessao(statusCode, errorMessage);
+
       console.log(`[conexão] Fechada — código: ${statusCode} | msg: ${errorMessage.slice(0, 80)} | limpar: ${deveLimpar}`);
+
       if (deveLimpar) {
         console.log('[sessão] Limpando credenciais inválidas...');
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
         sessaoInvalidada = true;
-        console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento...');
+        console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento pelo formulário web...');
         setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
@@ -210,18 +228,21 @@ async function iniciarBot() {
     for (const msg of messages) {
       try {
         if (msg.key.fromMe) continue;
-        const jid = msg.key.remoteJid || '';
-        if (!jid.endsWith('@g.us')) continue;
+        const jid     = msg.key.remoteJid || '';
+        const isGroup = jid.endsWith('@g.us');
+        if (!isGroup) continue;
+
         const groupMeta = await sock.groupMetadata(jid).catch(() => null);
-        if (!norm(groupMeta?.subject || '').includes(norm(GRUPO_NOME))) continue;
+        const nomeGrupo = groupMeta?.subject || '';
+        if (!norm(nomeGrupo).includes(norm(GRUPO_NOME))) continue;
         jidGrupoGlobal = jid;
 
-        // Áudio
         const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {
           try {
             const buffer   = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-            const textoRaw = await transcreverAudio(buffer, audioMsg.mimetype || 'audio/ogg; codecs=opus');
+            const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
+            const textoRaw = await transcreverAudio(buffer, mimeType);
             if (textoRaw) {
               const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
               console.log('Transcrição:', textoRaw);
@@ -232,7 +253,6 @@ async function iniciarBot() {
           continue;
         }
 
-        // Texto
         const textMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
         if (!textMsg.trim()) continue;
         const resposta = await processarTexto(textMsg, jid, sock);
