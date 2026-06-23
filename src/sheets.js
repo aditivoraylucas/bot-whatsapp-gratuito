@@ -1,6 +1,4 @@
 // ─── GOOGLE SHEETS via REST API direta (sem google-auth-library) ──────────────
-// Usa JWT assinado com crypto nativo do Node para obter token OAuth.
-// Isso evita o "Premature close" causado pela google-auth-library no Render Free.
 const crypto = require('crypto');
 
 const {
@@ -15,7 +13,7 @@ const {
   ULTIMOS_LANCAMENTOS, pushLancamento,
 } = require('./utils');
 
-// ── Token OAuth cacheado ──────────────────────────────────────────────────────
+// ── Token OAuth cacheado ──────────────────────────────────────────────────
 let _tokenCache = null;
 let _tokenExpiry = 0;
 
@@ -35,8 +33,6 @@ async function getAccessToken() {
   })).toString('base64url');
 
   const signingInput = `${header}.${payload}`;
-
-  // GOOGLE_PRIVATE_KEY já vem processado do config.js — não aplica replace aqui
   const key = GOOGLE_PRIVATE_KEY;
 
   console.log('[sheets] getAccessToken — email:', GOOGLE_SERVICE_ACCOUNT_EMAIL);
@@ -59,12 +55,15 @@ async function getAccessToken() {
   const data = await resp.json();
   console.log('[sheets] OAuth OK — token obtido, expires_in:', data.expires_in);
   _tokenCache  = data.access_token;
-  _tokenExpiry = agora + (data.expires_in - 300) * 1000; // renova 5min antes
+  _tokenExpiry = agora + (data.expires_in - 300) * 1000;
   return _tokenCache;
 }
 
-// ── Helpers REST ──────────────────────────────────────────────────────────────
+// ── Helpers REST ─────────────────────────────────────────────────────
+// BASE aponta para a planilha; batchUpdate usa BASE:batchUpdate (com dois-pontos)
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`;
+
+console.log('[sheets] BASE URL:', BASE);
 
 async function sheetsGET(path) {
   const token = await getAccessToken();
@@ -75,7 +74,9 @@ async function sheetsGET(path) {
 
 async function sheetsPOST(path, body) {
   const token = await getAccessToken();
-  const r = await fetch(`${BASE}${path}`, {
+  // batchUpdate usa ":batchUpdate" (dois-pontos), não "/batchUpdate"
+  const url = path === ':batchUpdate' ? `${BASE}:batchUpdate` : `${BASE}${path}`;
+  const r = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -97,8 +98,10 @@ async function sheetsPUT(path, body) {
 
 async function sheetsDELETE(path, body) {
   const token = await getAccessToken();
-  const r = await fetch(`${BASE}${path}`, {
-    method: 'POST', // batchUpdate usa POST
+  // deleteRows também usa batchUpdate com dois-pontos
+  const url = `${BASE}:batchUpdate`;
+  const r = await fetch(url, {
+    method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -106,10 +109,7 @@ async function sheetsDELETE(path, body) {
   return r.json();
 }
 
-// ── Estrutura da planilha ─────────────────────────────────────────────────────
-// Aba 0 (Saldo):    Cliente | Produto | Quantidade | Total | UltimaCompra
-// Aba 1 (Historico):Data   | Cliente | Tipo       | Produto | Quantidade | Valor
-
+// ── Estrutura da planilha ───────────────────────────────────────────────────
 const HDR_SALDO    = ['Cliente','Produto','Quantidade','Total','UltimaCompra'];
 const HDR_HIST     = ['Data','Cliente','Tipo','Produto','Quantidade','Valor'];
 
@@ -117,16 +117,13 @@ async function getSheetsMeta() {
   return comRetry(() => sheetsGET('?fields=sheets(properties(sheetId,title,index))'), 4, 'getSheetsMeta');
 }
 
-// ── Garante que a aba 0 se chama "Saldo" ─────────────────────────────────────
 async function ensureSaldoSheet(meta) {
   const aba0 = meta.sheets[0].properties;
   if (aba0.title === 'Saldo') return aba0;
-  // Já existe aba chamada Saldo em outra posição? Não faz nada.
   const jaExiste = meta.sheets.find(s => s.properties.title === 'Saldo');
   if (jaExiste) return jaExiste.properties;
-  // Renomeia a aba 0 para "Saldo"
   console.log(`[sheets] Renomeando aba "${aba0.title}" → "Saldo"`);
-  await comRetry(() => sheetsPOST('/batchUpdate', {
+  await comRetry(() => sheetsPOST(':batchUpdate', {
     requests: [{ updateSheetProperties: {
       properties: { sheetId: aba0.sheetId, title: 'Saldo' },
       fields: 'title',
@@ -136,7 +133,6 @@ async function ensureSaldoSheet(meta) {
 }
 
 async function ensureHeaders(sheetTitle, headers, sheetId) {
-  // Verifica se a primeira linha já tem cabeçalhos; se não, insere
   const range = `${sheetTitle}!A1:${String.fromCharCode(64 + headers.length)}1`;
   const data  = await comRetry(() => sheetsGET(`/values/${encodeURIComponent(range)}`), 4, 'ensureHeaders');
   const first = (data.values || [[]])[0] || [];
@@ -149,7 +145,7 @@ async function ensureHeaders(sheetTitle, headers, sheetId) {
 async function getOrCreateHistSheet(meta) {
   const exists = meta.sheets.find(s => s.properties.title === 'Historico');
   if (exists) return exists.properties;
-  const resp = await comRetry(() => sheetsPOST('/batchUpdate', {
+  const resp = await comRetry(() => sheetsPOST(':batchUpdate', {
     requests: [{ addSheet: { properties: { title: 'Historico' } } }],
   }), 4, 'addSheet');
   const props = resp.replies[0].addSheet.properties;
@@ -157,7 +153,6 @@ async function getOrCreateHistSheet(meta) {
   return props;
 }
 
-// ── Leitura de linhas ─────────────────────────────────────────────────────────
 async function getRows(sheetTitle, headers) {
   const lastCol = String.fromCharCode(64 + headers.length);
   const data = await comRetry(
@@ -167,12 +162,11 @@ async function getRows(sheetTitle, headers) {
   return (data.values || []).map((row, i) => {
     const obj = {};
     headers.forEach((h, j) => obj[h] = row[j] || '');
-    obj._rowIndex = i + 2; // linha real na planilha (1-based, linha 1 = header)
+    obj._rowIndex = i + 2;
     return obj;
   });
 }
 
-// ── Escrita / atualização / deleção de linhas ─────────────────────────────────
 async function appendRow(sheetTitle, headers, values) {
   const range = `${sheetTitle}!A:A`;
   await comRetry(() => sheetsPOST(`/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
@@ -191,10 +185,9 @@ async function updateRow(sheetTitle, headers, rowIndex, values) {
 }
 
 async function deleteRows(sheetId, rowIndexes) {
-  // Deleta em ordem decrescente para não deslocar índices
   const sorted = [...new Set(rowIndexes)].sort((a, b) => b - a);
   for (const ri of sorted) {
-    await comRetry(() => sheetsDELETE('/batchUpdate', {
+    await comRetry(() => sheetsDELETE(':batchUpdate', {
       requests: [{ deleteDimension: {
         range: { sheetId, dimension: 'ROWS', startIndex: ri - 1, endIndex: ri },
       } }],
@@ -202,7 +195,6 @@ async function deleteRows(sheetId, rowIndexes) {
   }
 }
 
-// ── Operações de negócio ──────────────────────────────────────────────────────
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const meta     = await getSheetsMeta();
@@ -628,7 +620,6 @@ async function zerarCliente(nomeDigitado) {
   } catch (err) { console.error('Erro zerar:', err.message); return '❌ Erro ao zerar cliente.'; }
 }
 
-// Exports mantidos iguais para compatibilidade com o resto do código
 module.exports = {
   getDoc: async () => ({}), getSheetSaldo: async () => ({}), getSheetHistorico: async () => ({}),
   registrarOuAcumular, cancelarLancamento,
