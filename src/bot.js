@@ -23,6 +23,11 @@ let tentativasReconexao   = 0;
 // Flag que impede restaurar sessão após loggedOut — só novo pairing resolve
 let sessaoInvalidada = false;
 
+// ── Deduplicação de mensagens ───────────────────────────────────────────────────────────
+// Evita reprocessar a mesma mensagem caso o Baileys dispare messages.upsert duplicado
+const mensagensProcessadas = new Set();
+const TTL_MENSAGEM_MS      = 30_000;
+
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
 function getPairingNumero()    { return pairingNumero; }
@@ -229,6 +234,17 @@ async function iniciarBot() {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
+        // ── Deduplicação: ignora mensagem já processada nos últimos 30s ──
+        const msgId = msg?.key?.id;
+        if (msgId) {
+          if (mensagensProcessadas.has(msgId)) {
+            console.log(`[dedup] mensagem ignorada (duplicada): ${msgId}`);
+            continue;
+          }
+          mensagensProcessadas.add(msgId);
+          setTimeout(() => mensagensProcessadas.delete(msgId), TTL_MENSAGEM_MS);
+        }
+
         if (msg.key.fromMe) continue;
         const jid     = msg.key.remoteJid || '';
         const isGroup = jid.endsWith('@g.us');
