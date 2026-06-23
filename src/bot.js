@@ -1,4 +1,4 @@
-// ─── LÓGICA DO WHATSAPP / BAILEYS ──────────────────────────────────────────────────
+// ─── LÓGICA DO WHATSAPP / BAILEYS ──────────────────────────────────────────────
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const fs   = require('fs');
 const path = require('path');
@@ -9,7 +9,7 @@ const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ──────────────────────────────────────────────────────────────
+// ── Estado compartilhado ────────────────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -20,14 +20,16 @@ let pairingPendente       = false;
 let pairingNumero         = '';
 let tentativasReconexao   = 0;
 
+// Flag que impede restaurar sessão após loggedOut — só novo pairing resolve
+let sessaoInvalidada = false;
+
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
 function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Helper: normaliza o array de env-vars da Render API ─────────────────────────────
-// Render API v1 retorna [{envVar:{key,value},cursor:"..."}, ...]
+// ── Helper: normaliza o array de env-vars da Render API ─────────────────────────
 function normalizarEnvVars(raw) {
   if (!Array.isArray(raw)) raw = raw?.envVars || [];
   return raw
@@ -40,7 +42,7 @@ async function buscarEnvVarsRender() {
     headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
   });
   if (!resGet.ok) throw new Error(`Render GET env-vars falhou: ${resGet.status}`);
-  const raw  = await resGet.json();
+  const raw   = await resGet.json();
   const lista = normalizarEnvVars(raw);
   console.log(`[Render API] ${lista.length} env-vars encontradas.`);
   return lista;
@@ -56,7 +58,7 @@ async function putEnvVarsRender(novas) {
   if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
 }
 
-// ── Limpa sessão corrompida (401 / loggedOut) ───────────────────────────────
+// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────────
 function limparSessaoLocal() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
@@ -73,11 +75,18 @@ async function limparSessaoNoRender() {
     const novas = existente.filter(v => v.key !== 'CREDS_JSON');
     await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON removido da Render API.');
+    // Invalida também o process.env local para não reutilizar na mesma instância
+    delete process.env.CREDS_JSON;
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
-// ── Sessão persistente ─────────────────────────────────────────────────────────────
+// ── Sessão persistente ──────────────────────────────────────────────────────────────────
 function restaurarSessao() {
+  // Se a sessão foi invalidada por logout, não restaura — aguarda novo pairing
+  if (sessaoInvalidada) {
+    console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
+    return false;
+  }
   try {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (fs.existsSync(credsPath)) {
@@ -109,21 +118,12 @@ async function salvarSessaoNoRender() {
       { key: 'CREDS_JSON', value: conteudo },
     ];
     await putEnvVarsRender(novas);
+    process.env.CREDS_JSON = conteudo; // atualiza local também
     console.log('[sessão] CREDS_JSON atualizado na Render API.');
   } catch (e) { console.error('[sessão] Erro ao salvar sessao:', e.message); }
 }
 
-// ── Determina se o disconnect exige limpeza total de sessão ─────────────────────────
-//
-// Códigos que LIMPAM a sessão (sessão realmente inválida):
-//   401 loggedOut          — você desconectou pelo telefone
-//   411 multideviceMismatch — conflito de dispositivo
-//   Bad MAC / decrypt fail  — chaves corrompidas
-//
-// Códigos que NÃO limpam (apenas reconectam):
-//   515 Stream Errored      — restart normal do stream do WhatsApp (NÃO é logout)
-//   408 / timedOut          — timeout de conexão
-//   outros                  — quedas de rede, etc.
+// ── Determina se o disconnect exige limpeza total de sessão ──────────────────────────
 function precisaLimparSessao(statusCode, errorMessage) {
   if (statusCode === DisconnectReason.loggedOut)           return true; // 401
   if (statusCode === DisconnectReason.multideviceMismatch) return true; // 411
@@ -132,13 +132,16 @@ function precisaLimparSessao(statusCode, errorMessage) {
     errorMessage.includes('bad mac') ||
     errorMessage.includes('Failed to decrypt')
   )) return true;
-  // 515 (Stream Errored) e outros: apenas reconectar, sem limpar
   return false;
 }
 
-// ── iniciarBot ───────────────────────────────────────────────────────────────────────
+// ── iniciarBot ────────────────────────────────────────────────────────────────────
 async function iniciarBot() {
-  restaurarSessao();
+  // Se sessão invalidada, apenas inicializa sem credenciais (aguarda pairing)
+  if (!sessaoInvalidada) {
+    restaurarSessao();
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version }          = await fetchLatestBaileysVersion();
   const logger               = pino({ level: 'silent' });
@@ -174,6 +177,7 @@ async function iniciarBot() {
     if (connection === 'open') {
       botConectado        = true;
       pairingPendente     = false;
+      sessaoInvalidada    = false; // conexão bem-sucedida: libera restauração futura
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
@@ -212,6 +216,10 @@ async function iniciarBot() {
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
+        // Marca sessão como invalidada: não tenta restaurar do CREDS_JSON
+        sessaoInvalidada = true;
+        console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento pelo formulário web...');
+        // Reinicia sem credenciais para ficar pronto para receber pairing code
         setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
