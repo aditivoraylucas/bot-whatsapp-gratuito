@@ -122,17 +122,36 @@ const KW_VISTA = new Set([
   'pix','debito','credito','cartao',
 ]);
 
+// ── Mapa de método de pagamento a partir da keyword ──────────────────────────────────
+const KW_METODO = {
+  'pix':      'Pix',
+  'transferiu':'Pix',
+  'debito':   'Débito',
+  'credito':  'Crédito',
+  'cartao':   'Crédito',
+  'dinheiro': 'Dinheiro',
+  'especie':  'Dinheiro',
+  'avista':   'Dinheiro',
+  'vista':    'Dinheiro',
+  'pago':     '',
+  'paga':     '',
+};
+
+function extrairMetodo(texto) {
+  const tNorm = norm(texto);
+  for (const [kw, metodo] of Object.entries(KW_METODO)) {
+    if (new RegExp(`\\b${kw}\\b`).test(tNorm)) return metodo;
+  }
+  return '';
+}
+
 /**
  * Detecta frases do tipo:
  *   "Calor 2 trufas pago pix"
  *   "Raylucas 1 bombom pago dinheiro"
  *   "Ana 3 trufas pago"
  *
- * Regra: a linha deve conter produto(s) + quantidade(s) E ao menos uma KW_VISTA
- * DEPOIS do bloco de itens (ou misturado ao final), SEM palavras-chave de
- * pagamento de dívida (pagou / transferiu / depositou) antes do produto.
- *
- * Retorna { nome, itens } ou null.
+ * Retorna { nome, itens, metodo } ou null.
  */
 function parsearVendaVista(linha) {
   const tNorm = norm(linha);
@@ -148,6 +167,9 @@ function parsearVendaVista(linha) {
   });
   if (!temVista) return null;
 
+  // Extrai o método antes de limpar a linha
+  const metodo = extrairMetodo(linha);
+
   // Remove as KW_VISTA da linha para deixar apenas nome + itens
   let linhaLimpa = tNorm;
   for (const kw of KW_VISTA) {
@@ -155,11 +177,10 @@ function parsearVendaVista(linha) {
   }
   linhaLimpa = linhaLimpa.replace(/\s+/g, ' ').trim();
 
-  // Reutiliza parsearLinha com a linha sem as KW_VISTA
   const resultado = parsearLinha(linhaLimpa);
   if (!resultado) return null;
 
-  return resultado; // { nome, itens }
+  return { ...resultado, metodo };
 }
 
 function parsearPagamento(linha) {
@@ -175,6 +196,10 @@ function parsearPagamento(linha) {
   if (kwIdx <= 0) return null;
   const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
   if (!nomeRaw) return null;
+
+  // Detecta método a partir da keyword principal e do restante da linha
+  const metodo = extrairMetodo(linha);
+
   const resto = palavrasNorm.slice(kwIdx + 1).join(' ').trim();
   if (resto) {
     const partesResto = resto.split(/\s+/).filter(Boolean);
@@ -190,10 +215,10 @@ function parsearPagamento(linha) {
         const p1 = toProduto(partesResto[i]); if (p1) { prod = p1; qtd = qtd || 1; break; }
       }
     }
-    if (prod && qtd) return { tipo: 'produto', nome: nomeRaw, quantidade: qtd, produto: prod };
+    if (prod && qtd) return { tipo: 'produto', nome: nomeRaw, quantidade: qtd, produto: prod, metodo };
   }
   const valor = extrairValor(resto || linha);
-  if (valor && valor > 0) return { tipo: 'valor', nome: nomeRaw, valor };
+  if (valor && valor > 0) return { tipo: 'valor', nome: nomeRaw, valor, metodo };
   return null;
 }
 
@@ -289,19 +314,20 @@ async function processarTexto(texto, jid, sock) {
   if (vista) {
     const msgs = [];
     for (const item of vista.itens) {
-      const res = await registrarVendaVista(vista.nome, item.produto, item.quantidade);
+      const res = await registrarVendaVista(vista.nome, item.produto, item.quantidade, vista.metodo);
       if (!res) { msgs.push(`❌ Erro ao registrar venda à vista de ${vista.nome}.`); continue; }
       const valor = (PRECOS[item.produto] || 0) * item.quantidade;
       pushLancamento(jid, { tipo: 'compra', cliente: res.cliente, produto: item.produto, quantidade: item.quantidade, valor });
-      msgs.push(`💵 *${res.cliente}*: ${item.quantidade} ${nomeProdutoExib(item.produto)}(s) = R$ ${valor.toFixed(2)} _(pago à vista)_`);
+      const metodoLabel = vista.metodo ? ` — ${vista.metodo}` : '';
+      msgs.push(`💵 *${res.cliente}*: ${item.quantidade} ${nomeProdutoExib(item.produto)}(s) = R$ ${valor.toFixed(2)} _(pago à vista${metodoLabel})_`);
     }
     return msgs.join('\n');
   }
 
   const pag = parsearPagamento(texto);
   if (pag) {
-    if (pag.tipo === 'produto') { const r = await processarPagamentoProduto(pag.nome, pag.quantidade, pag.produto, jid); return r.msg; }
-    if (pag.tipo === 'valor')   { const r = await processarPagamentoValor(pag.nome, pag.valor, jid); return r.msg; }
+    if (pag.tipo === 'produto') { const r = await processarPagamentoProduto(pag.nome, pag.quantidade, pag.produto, jid, pag.metodo); return r.msg; }
+    if (pag.tipo === 'valor')   { const r = await processarPagamentoValor(pag.nome, pag.valor, jid, pag.metodo); return r.msg; }
   }
 
   const compra = parsearLinha(texto);

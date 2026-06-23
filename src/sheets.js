@@ -108,7 +108,8 @@ async function sheetsDELETE(path, body) {
 
 // ── Estrutura da planilha ───────────────────────────────────────────────────────────────────────
 const HDR_SALDO    = ['Cliente','Produto','Quantidade','Total','UltimaCompra'];
-const HDR_HIST     = ['Data','Cliente','Tipo','Produto','Quantidade','Valor'];
+// Adicionada coluna Metodo (Pix / Dinheiro / '') para rastrear forma de pagamento
+const HDR_HIST     = ['Data','Cliente','Tipo','Produto','Quantidade','Valor','Metodo'];
 
 async function getSheetsMeta() {
   return comRetry(() => sheetsGET('?fields=sheets(properties(sheetId,title,index))'), 4, 'getSheetsMeta');
@@ -219,18 +220,18 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
       await updateRow('Saldo', HDR_SALDO, existente._rowIndex, {
         ...existente, Quantidade: qtdAcumulada, Total: totalAcumulado.toFixed(2), UltimaCompra: agora(),
       });
-      await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2) });
+      await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2), Metodo: '' });
       return { cliente, totalAcumulado, qtdAcumulada };
     } else {
       await appendRow('Saldo', HDR_SALDO, { Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: valorNovo.toFixed(2), UltimaCompra: agora() });
-      await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2) });
+      await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2), Metodo: '' });
       return { cliente, totalAcumulado: valorNovo, qtdAcumulada: quantidade };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
 }
 
 // ── Venda à vista: grava Compra + Pagamento no Histórico, sem tocar no Saldo ────────────────
-async function registrarVendaVista(clienteEnviado, produto, quantidade) {
+async function registrarVendaVista(clienteEnviado, produto, quantidade, metodo) {
   try {
     const meta     = await getSheetsMeta();
     await ensureSaldoSheet(meta);
@@ -241,19 +242,20 @@ async function registrarVendaVista(clienteEnviado, produto, quantidade) {
     const preco     = PRECOS[produto] || 0;
     const valor     = preco * quantidade;
     const dataAgora = agora();
+    const metodoStr = metodo || '';
 
     // Grava a compra no histórico
     await appendRow('Historico', HDR_HIST, {
       Data: dataAgora, Cliente: cliente, Tipo: 'Compra',
-      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2),
+      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2), Metodo: '',
     });
-    // Grava o pagamento imediato no histórico
+    // Grava o pagamento imediato no histórico com o método
     await appendRow('Historico', HDR_HIST, {
       Data: dataAgora, Cliente: cliente, Tipo: 'Pagamento',
-      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2),
+      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2), Metodo: metodoStr,
     });
 
-    return { cliente, valor };
+    return { cliente, valor, metodo: metodoStr };
   } catch (err) { console.error('Erro venda à vista:', err.message); return null; }
 }
 
@@ -320,7 +322,7 @@ async function cancelarLancamento(jid, nomeDigitado) {
   } catch (err) { console.error('Erro cancelar:', err.message); return '❌ Erro ao cancelar lançamento.'; }
 }
 
-async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid) {
+async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid, metodo) {
   try {
     const meta    = await getSheetsMeta();
     const saldoProp = await ensureSaldoSheet(meta);
@@ -335,8 +337,9 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
     const novaQtd    = qtdAtual - qtdPaga;
     const totalAtual = parseFloat(row.Total || '0');
     const pago       = qtdAtual > 0 ? (totalAtual / qtdAtual) * qtdPaga : 0;
+    const metodoStr  = metodo || '';
     if (jid) pushLancamento(jid, { tipo: 'pagamento', cliente, produto, quantidade: qtdPaga, valor: pago });
-    await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2) });
+    await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: qtdPaga, Valor: pago.toFixed(2), Metodo: metodoStr });
     if (novaQtd === 0) {
       await deleteRows(saldoId, [row._rowIndex]);
       return { ok: true, msg: `✅ *${cliente}* quitou toda a dívida de ${nomeProdutoExib(produto)}! Pagou R$ ${pago.toFixed(2)}.` };
@@ -347,7 +350,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
   } catch (err) { console.error('Erro pag produto:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
-async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
+async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
   try {
     const meta    = await getSheetsMeta();
     const saldoProp = await ensureSaldoSheet(meta);
@@ -362,8 +365,9 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid) {
     if (!rowsCliente.length) return { ok: false, msg: `❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.` };
     const cliente     = rowsCliente[0].Cliente;
     const totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.Total || '0'), 0);
+    const metodoStr   = metodo || '';
     if (jid) pushLancamento(jid, { tipo: 'pagamento', cliente, produto: 'geral', quantidade: '-', valor: valorPago });
-    await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2) });
+    await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2), Metodo: metodoStr });
     if (valorPago >= totalDevido) {
       await deleteRows(saldoId, rowsCliente.map(r => r._rowIndex));
       return { ok: true, msg: `✅ *${cliente}* quitou toda a dívida! Pagou R$ ${valorPago.toFixed(2)}.` };
@@ -456,6 +460,7 @@ async function carregarHistoricoAgrupado(filtroMes) {
       produto: norm(row.Produto),
       qtd:     row.Quantidade.trim(),
       valor:   parseFloat(row.Valor || '0'),
+      metodo:  (row.Metodo || '').trim(),
     });
   }
   return { historico, saldos };
@@ -581,22 +586,63 @@ async function gerarResumoDiario() {
   try {
     const hoje = agoraData();
     const { historico } = await carregarHistoricoAgrupado();
-    let totalVendas = 0, totalPago = 0, qtdTrufa = 0, qtdBolo = 0;
+
+    let totalVendas = 0;
+    let totalPix = 0, totalDinheiro = 0, totalOutros = 0;
+    let qtdTrufa = 0, qtdBolo = 0;
     const clientesSet = new Set();
+
     for (const [nome, movs] of Object.entries(historico)) {
       for (const m of movs) {
         if (soData(m.data) !== hoje) continue;
+
         if (m.tipo === 'Compra') {
           totalVendas += m.valor;
           if (m.produto === 'trufa') qtdTrufa += parseInt(m.qtd || '0');
           if (m.produto === 'bolo')  qtdBolo  += parseInt(m.qtd || '0');
           clientesSet.add(nome);
-        } else if (m.tipo === 'Pagamento') totalPago += m.valor;
+        } else if (m.tipo === 'Pagamento') {
+          const met = norm(m.metodo || '');
+          if (met === 'pix' || met === 'transferiu' || met === 'transferencia') {
+            totalPix += m.valor;
+          } else if (met === 'dinheiro' || met === 'especie' || met === 'avista' || met === 'vista') {
+            totalDinheiro += m.valor;
+          } else {
+            // sem método especificado ou outros (débito, crédito…)
+            totalOutros += m.valor;
+          }
+        }
       }
     }
+
+    const totalRecebido = totalPix + totalDinheiro + totalOutros;
+
+    // Total em aberto = tudo que foi vendido hoje e ainda não foi pago
+    // = vendas do dia - recebido do dia
+    // (pagamentos de dívidas de dias anteriores recebidos hoje NÃO entram em totalVendas,
+    //  por isso usamos o saldo geral como referência para o campo "Total em aberto")
     const rows        = await getRows('Saldo', HDR_SALDO);
     const totalAberto = rows.reduce((s, r) => s + parseFloat(r.Total || '0'), 0);
-    return `*Resumo do Dia - ${hoje}*\n───────────────\nTrufas: ${qtdTrufa} | Bolos: ${qtdBolo}\nClientes atendidos: ${clientesSet.size}\nVendas do dia: R$ ${totalVendas.toFixed(2)}\nRecebido hoje: R$ ${totalPago.toFixed(2)}\n───────────────\nTotal em aberto: R$ ${totalAberto.toFixed(2)}`;
+
+    // Monta linha de recebido
+    const linhasRecebido = [];
+    if (totalPix > 0)      linhasRecebido.push(`  💳 Pix: R$ ${totalPix.toFixed(2)}`);
+    if (totalDinheiro > 0) linhasRecebido.push(`  💵 Dinheiro: R$ ${totalDinheiro.toFixed(2)}`);
+    if (totalOutros > 0)   linhasRecebido.push(`  💰 Outros: R$ ${totalOutros.toFixed(2)}`);
+    if (!linhasRecebido.length) linhasRecebido.push(`  R$ 0,00`);
+    linhasRecebido.push(`  *Total: R$ ${totalRecebido.toFixed(2)}*`);
+
+    return [
+      `*Resumo do Dia - ${hoje}*`,
+      `───────────────`,
+      `Trufas: ${qtdTrufa} | Bolos: ${qtdBolo}`,
+      `Clientes atendidos: ${clientesSet.size}`,
+      `Vendas do dia: R$ ${totalVendas.toFixed(2)}`,
+      `Recebido hoje:`,
+      ...linhasRecebido,
+      `───────────────`,
+      `Total em aberto: R$ ${totalAberto.toFixed(2)}`,
+    ].join('\n');
   } catch (err) { console.error('Erro resumo:', err.message); return '❌ Erro ao gerar resumo.'; }
 }
 
@@ -640,7 +686,7 @@ async function zerarCliente(nomeDigitado) {
     if (!rowsCliente.length) return `✅ *${nomeCanon}* já está sem dívidas.`;
     const totalZerado = rowsCliente.reduce((s, r) => s + parseFloat(r.Total || '0'), 0);
     await deleteRows(saldoId, rowsCliente.map(r => r._rowIndex));
-    await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: nomeCanon, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: totalZerado.toFixed(2) });
+    await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: nomeCanon, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: totalZerado.toFixed(2), Metodo: '' });
     return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
   } catch (err) { console.error('Erro zerar:', err.message); return '❌ Erro ao zerar cliente.'; }
 }
