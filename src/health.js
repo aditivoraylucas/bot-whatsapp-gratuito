@@ -18,6 +18,25 @@ function init({ getBotConectado, getSockGlobal, getPairingNumero, setPairingPend
   _setPairingNumero   = setPairingNumero;
 }
 
+// ── Self-ping: evita hibernação do Render Free ────────────────────────────────
+// Faz uma requisição para /ping a cada 10 minutos.
+// O Render hiberna serviços gratuitos após ~15min sem tráfego.
+function iniciarSelfPing() {
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  const INTERVALO  = 10 * 60 * 1000; // 10 minutos
+
+  setInterval(async () => {
+    try {
+      const r = await fetch(`${RENDER_URL}/ping`);
+      console.log(`[self-ping] ${new Date().toISOString()} — status: ${r.status}`);
+    } catch (e) {
+      console.warn('[self-ping] Falhou:', e.message);
+    }
+  }, INTERVALO);
+
+  console.log(`[self-ping] Iniciado — ping a cada 10min para ${RENDER_URL}/ping`);
+}
+
 // ── Diagnóstico Google Sheets ──────────────────────────────────────────────
 async function testarPlanilha() {
   const resultado = {
@@ -29,7 +48,6 @@ async function testarPlanilha() {
     erro_detalhado:    null,
   };
 
-  // Passo 1: obter token OAuth
   try {
     const agora = Date.now();
     const iat = Math.floor(agora / 1000);
@@ -62,7 +80,6 @@ async function testarPlanilha() {
     resultado.token_step = `✅ Token obtido (expira em ${data.expires_in}s)`;
     const token = data.access_token;
 
-    // Passo 2: acessar a planilha
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=spreadsheetId,properties(title)`;
     const r2 = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     const txt2 = await r2.text();
@@ -117,6 +134,13 @@ function paginaPairing(estado) {
 // ── Servidor HTTP ────────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   try {
+    // GET /ping — usado pelo self-ping e pelo UptimeRobot
+    if (req.method === 'GET' && req.url === '/ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ pong: true, ts: Date.now(), conectado: _getBotConectado() }));
+      return;
+    }
+
     // GET /health
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -134,7 +158,6 @@ const server = http.createServer(async (req, res) => {
     // GET /test-sheets — diagnóstico completo da planilha
     if (req.method === 'GET' && req.url === '/test-sheets') {
       const r = await testarPlanilha();
-      const cor = (v) => v && v.startsWith('✅') ? '#166534' : '#991b1b';
       const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <title>Diagnóstico Planilha</title>
@@ -256,6 +279,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`✅ Servidor rodando na porta ${PORT}`);
+  // Inicia o self-ping após 30s (aguarda o servidor estabilizar)
+  setTimeout(iniciarSelfPing, 30_000);
+});
 
 module.exports = { init };
