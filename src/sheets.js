@@ -35,7 +35,13 @@ async function getAccessToken() {
   })).toString('base64url');
 
   const signingInput = `${header}.${payload}`;
-  const key = GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+
+  // GOOGLE_PRIVATE_KEY já vem processado do config.js — não aplica replace aqui
+  const key = GOOGLE_PRIVATE_KEY;
+
+  console.log('[sheets] getAccessToken — email:', GOOGLE_SERVICE_ACCOUNT_EMAIL);
+  console.log('[sheets] getAccessToken — key inicia com:', key?.slice(0, 40));
+
   const sign = crypto.createSign('RSA-SHA256');
   sign.update(signingInput);
   const signature = sign.sign(key, 'base64url');
@@ -51,6 +57,7 @@ async function getAccessToken() {
     throw new Error(`OAuth token error ${resp.status}: ${txt}`);
   }
   const data = await resp.json();
+  console.log('[sheets] OAuth OK — token obtido, expires_in:', data.expires_in);
   _tokenCache  = data.access_token;
   _tokenExpiry = agora + (data.expires_in - 300) * 1000; // renova 5min antes
   return _tokenCache;
