@@ -1,4 +1,4 @@
-// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────────────
+// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────
 const FormData = require('form-data');
 const { GROQ_API_KEY, LIMITE_CREDITO_PADRAO } = require('./config');
 const {
@@ -16,7 +16,7 @@ const {
   gerarResumoDiario, zerarCliente,
 } = require('./sheets');
 
-// ── Correções de transcrição de voz ──────────────────────────────────────────
+// ── Correções de transcrição de voz ────────────────────────────────────────
 const CORRECOES_VOZ = {
   'saudo':'saldo','saud':'saldo','salvo':'saldo','salda':'saldo','saldos':'saldo',
   'relatorios':'relatorio','relato':'relatorio',
@@ -45,12 +45,13 @@ function corrigirTranscricao(texto) {
   return texto.split(/\s+/).map(p => corrigirPalavra(p)).join(' ');
 }
 
-// ── Transcrição de áudio via Groq Whisper ─────────────────────────────────────
+// ── Transcrição de áudio via Groq Whisper ─────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
   try {
-    const ext  = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
-    const form = new FormData();
+    const fetch = (await import('node-fetch')).default;
+    const ext   = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
+    const form  = new FormData();
     form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
@@ -74,7 +75,7 @@ async function transcreverAudio(audioBuffer, mimeType) {
   } catch (e) { console.error('Erro transcrição Groq:', e.message); return null; }
 }
 
-// ── Parser de compra ──────────────────────────────────────────────────────────
+// ── Parser de compra ────────────────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -196,7 +197,7 @@ function mensagemAjuda() {
   ].join('\n');
 }
 
-// ── Processador principal de texto ───────────────────────────────────────────
+// ── Processador principal de texto ─────────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
   if (!texto) return null;
   const t        = norm(texto);
