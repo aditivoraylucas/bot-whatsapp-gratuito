@@ -1,8 +1,8 @@
-// ─── UTILITÁRIOS COMPARTILHADOS ───────────────────────────────────────────────
+// ─── UTILITÁRIOS COMPARTILHADOS ──────────────────────────────────────────────
 const fs   = require('fs');
 const path = require('path');
 
-// ── Normalização de texto ─────────────────────────────────────────────────────
+// ── Normalização de texto ──────────────────────────────────────────────────────────────────────
 function norm(t) {
   return (t || '')
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
@@ -19,14 +19,16 @@ function capitalizarNome(n) {
 
 function agora() { return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function agoraData() { return new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
-function soData(str) { if (!str) return ''; return (str.trim().split(' ')[0]) || str.trim(); }
+// toLocaleString('pt-BR') gera "DD/MM/AAAA, HH:MM:SS" — o split(' ')[0] fica "DD/MM/AAAA," (com vírgula)
+// O replace(',', '') remove essa vírgula para que a comparação com agoraData() funcione corretamente
+function soData(str) { if (!str) return ''; return (str.trim().split(' ')[0] || str.trim()).replace(',', ''); }
 
 function horaAtualSP() {
   const formatter = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: 'numeric', hour12: false });
   return parseInt(formatter.format(new Date()));
 }
 
-// ── Levenshtein / fuzzy nome ──────────────────────────────────────────────────
+// ── Levenshtein / fuzzy nome ────────────────────────────────────────────────────────────────
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) => [i]);
@@ -58,7 +60,7 @@ function resolverNome(digitado, nomesConhecidos) {
 
 function mesmoNome(a, b) { return norm(a) === norm(b) || nomesFuzzyIguais(a, b); }
 
-// ── Retry com backoff ─────────────────────────────────────────────────────────
+// ── Retry com backoff ─────────────────────────────────────────────────────────────────────────
 async function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
   for (let i = 0; i < tentativas; i++) {
     try {
@@ -77,7 +79,7 @@ async function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
   }
 }
 
-// ── Produtos e preços ─────────────────────────────────────────────────────────
+// ── Produtos e preços ───────────────────────────────────────────────────────────────────────────
 const PRECOS_FILE = 'precos.json';
 let PRECOS = { trufa: 5.0, bolo: 12.0 };
 try { if (fs.existsSync(PRECOS_FILE)) PRECOS = JSON.parse(fs.readFileSync(PRECOS_FILE, 'utf8')); } catch (e) {}
@@ -154,7 +156,7 @@ function nomeProdutoExib(produto) {
   return capitalizarNome(produto.replace(/_/g, ' '));
 }
 
-// ── Histórico de lançamentos (para cancelar) ──────────────────────────────────
+// ── Histórico de lançamentos (para cancelar) ─────────────────────────────────────────────────────
 const ULTIMOS_LANCAMENTOS = {};
 const MAX_HIST_CANCEL = 10;
 function pushLancamento(jid, obj) {
