@@ -16,19 +16,17 @@ const HORA_LEMBRETE                = parseInt(process.env.HORA_LEMBRETE || '20')
 const HORA_RESUMO                  = parseInt(process.env.HORA_RESUMO   || '21');
 
 // ─── SPREADSHEET_ID: aceita URL completa ou só o ID ──────────────────────────
-// Cole qualquer um destes no Render como SPREADSHEET_URL ou SPREADSHEET_ID:
-//   https://docs.google.com/spreadsheets/d/SEU_ID/edit
-//   SEU_ID  (somente o ID)
 const _rawUrl = process.env.SPREADSHEET_URL || process.env.SPREADSHEET_ID || '';
 const SPREADSHEET_ID =
   _rawUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)?.[1] ||
   _rawUrl.trim();
 
-// ─── DEBUG: confirma variáveis críticas no startup ────────────────────────────
+// ─── DEBUG startup ────────────────────────────────────────────────────────────
 console.log('[config] SPREADSHEET_RAW:', _rawUrl || '❌ INDEFINIDO');
 console.log('[config] SPREADSHEET_ID extraído:', SPREADSHEET_ID || '❌ VAZIO');
 console.log('[config] SERVICE_ACCOUNT:', GOOGLE_SERVICE_ACCOUNT_EMAIL || '❌ INDEFINIDO');
 console.log('[config] PRIVATE_KEY ok:', GOOGLE_PRIVATE_KEY ? '✅' : '❌ INDEFINIDA');
+console.log('[config] ENV_VARS_COUNT:', Object.keys(process.env).length);
 
 module.exports = {
   GRUPO_NOME, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY,
