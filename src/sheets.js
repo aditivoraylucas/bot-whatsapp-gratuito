@@ -350,6 +350,7 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
   } catch (err) { console.error('Erro pag produto:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
+// ── FIX: usa nomeCanon consistentemente em todo o fluxo de pagamento por valor ──────────────
 async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
   try {
     const meta    = await getSheetsMeta();
@@ -359,14 +360,18 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
     const rows    = await getRows('Saldo', HDR_SALDO);
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon   = resolverNome(clienteEnviado, nomesConhecidos);
+    // Se não achou no Saldo, tenta pelo nome capitalizado como fallback
+    const nomeEfetivo = nomeCanon || capitalizarNome(clienteEnviado);
     const rowsCliente = nomeCanon
       ? rows.filter(r => r.Cliente === nomeCanon)
       : rows.filter(r => mesmoNome(r.Cliente, clienteEnviado));
     if (!rowsCliente.length) return { ok: false, msg: `❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.` };
+    // Sempre usa nomeCanon (nome exato da planilha) para gravar no Histórico e operar no Saldo
     const cliente     = rowsCliente[0].Cliente;
     const totalDevido = rowsCliente.reduce((s, r) => s + parseFloat(r.Total || '0'), 0);
     const metodoStr   = metodo || '';
     if (jid) pushLancamento(jid, { tipo: 'pagamento', cliente, produto: 'geral', quantidade: '-', valor: valorPago });
+    // Grava no Histórico com o nome canônico exato
     await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Pagamento', Produto: 'geral', Quantidade: '-', Valor: valorPago.toFixed(2), Metodo: metodoStr });
     if (valorPago >= totalDevido) {
       await deleteRows(saldoId, rowsCliente.map(r => r._rowIndex));
@@ -466,17 +471,27 @@ async function carregarHistoricoAgrupado(filtroMes) {
   return { historico, saldos };
 }
 
+// ── FIX: saldo calculado direto pelo histórico (compras − pagamentos) ────────────────────────
+// Isso garante que edições manuais na planilha e pagamentos que atualizaram só o Histórico
+// sejam refletidos corretamente, sem depender da aba Saldo como fonte de verdade do saldo individual.
+function calcularSaldoPeloHistorico(movs) {
+  const totalCompras   = movs.filter(m => m.tipo === 'Compra').reduce((s, m) => s + m.valor, 0);
+  const totalPagamentos = movs.filter(m => m.tipo === 'Pagamento').reduce((s, m) => s + m.valor, 0);
+  return Math.max(0, totalCompras - totalPagamentos);
+}
+
 async function gerarRelatorioDetalhado() {
   try {
     const { historico, saldos } = await carregarHistoricoAgrupado();
     if (!Object.keys(historico).length) return 'Nenhuma movimentação registrada ainda.';
-    const devedores = Object.keys(historico).filter(n => (saldos[n] || 0) > 0);
+    // Calcula saldo pelo histórico para cada cliente — ignora aba Saldo (pode estar desatualizada)
+    const devedores = Object.keys(historico).filter(n => calcularSaldoPeloHistorico(historico[n]) > 0.001);
     if (!devedores.length) return '✅ Nenhuma dívida em aberto! Todos quitados.';
-    devedores.sort((a, b) => (saldos[b] || 0) - (saldos[a] || 0));
+    devedores.sort((a, b) => calcularSaldoPeloHistorico(historico[b]) - calcularSaldoPeloHistorico(historico[a]));
     let resposta = '*Relatório Detalhado*\n───────────────\n'; let totalGeral = 0;
     for (const nome of devedores) {
       const movs       = historico[nome];
-      const saldoAtual = saldos[nome] || 0;
+      const saldoAtual = calcularSaldoPeloHistorico(movs);
       resposta += `\n*${nome}*\n`;
       for (const m of movs) {
         if (m.tipo === 'Compra')         resposta += `  Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`;
@@ -492,9 +507,9 @@ async function gerarRelatorioDetalhado() {
 
 async function gerarRelatorioQuitados() {
   try {
-    const { historico, saldos } = await carregarHistoricoAgrupado();
+    const { historico } = await carregarHistoricoAgrupado();
     if (!Object.keys(historico).length) return 'Nenhuma movimentação registrada ainda.';
-    const quitados = Object.keys(historico).filter(n => !(saldos[n] > 0));
+    const quitados = Object.keys(historico).filter(n => calcularSaldoPeloHistorico(historico[n]) <= 0.001);
     if (!quitados.length) return 'Nenhum cliente quitado ainda.';
     quitados.sort();
     let resposta = '*Compras Quitadas*\n───────────────\n';
@@ -519,9 +534,12 @@ async function gerarSaldoIndividual(nomeDigitado) {
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon = resolverNome(nomeDigitado, nomesConhecidos);
     if (!nomeCanon) {
-      const { historico, saldos } = await carregarHistoricoAgrupado();
+      const { historico } = await carregarHistoricoAgrupado();
       const nomeHist = resolverNome(nomeDigitado, Object.keys(historico));
-      if (nomeHist && !(saldos[nomeHist] > 0)) return `✅ *${nomeHist}* não tem dívidas em aberto. Conta quitada!`;
+      if (nomeHist) {
+        const saldo = calcularSaldoPeloHistorico(historico[nomeHist]);
+        if (saldo <= 0.001) return `✅ *${nomeHist}* não tem dívidas em aberto. Conta quitada!`;
+      }
       return `❌ Nenhuma movimentação encontrada para *${capitalizarNome(nomeDigitado)}*.`;
     }
     const rowsCliente = rows.filter(r => r.Cliente === nomeCanon);
@@ -540,22 +558,24 @@ async function gerarSaldoIndividual(nomeDigitado) {
   } catch (err) { console.error('Erro saldo:', err.message); return '❌ Erro ao consultar saldo.'; }
 }
 
+// ── FIX: saldo calculado pelo histórico, não pela aba Saldo ─────────────────────────────────
 async function gerarHistoricoCliente(nomeDigitado) {
   try {
-    const { historico, saldos } = await carregarHistoricoAgrupado();
+    const { historico } = await carregarHistoricoAgrupado();
     const nomesConhecidos = Object.keys(historico);
     const nomeCanon = resolverNome(nomeDigitado, nomesConhecidos);
     if (!nomeCanon || !historico[nomeCanon]) return `❌ Nenhum histórico encontrado para *${capitalizarNome(nomeDigitado)}*.`;
     const movs       = historico[nomeCanon];
-    const saldoAtual = saldos[nomeCanon] || 0;
     let resposta = `*Histórico de ${nomeCanon}*\n───────────────\n`;
     let totalComprado = 0, totalPago = 0;
     for (const m of movs) {
       if (m.tipo === 'Compra')         { resposta += `Compra: ${m.qtd}x ${nomeProdutoExib(m.produto)} = R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`; totalComprado += m.valor; }
       else if (m.tipo === 'Pagamento') { resposta += `Pagamento: R$ ${m.valor.toFixed(2)}  (${soData(m.data)})\n`; totalPago += m.valor; }
     }
+    // Saldo calculado direto pelo histórico — independente da aba Saldo
+    const saldoAtual = Math.max(0, totalComprado - totalPago);
     resposta += `───────────────\nTotal comprado: R$ ${totalComprado.toFixed(2)}\nTotal pago: R$ ${totalPago.toFixed(2)}\n`;
-    resposta += saldoAtual > 0 ? `*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*` : '✅ *Conta quitada!*';
+    resposta += saldoAtual > 0.001 ? `*Saldo devedor: R$ ${saldoAtual.toFixed(2)}*` : '✅ *Conta quitada!*';
     return resposta;
   } catch (err) { console.error('Erro historico:', err.message); return '❌ Erro ao buscar histórico.'; }
 }
@@ -608,7 +628,6 @@ async function gerarResumoDiario() {
           } else if (met === 'dinheiro' || met === 'especie' || met === 'avista' || met === 'vista') {
             totalDinheiro += m.valor;
           } else {
-            // sem método especificado ou outros (débito, crédito…)
             totalOutros += m.valor;
           }
         }
@@ -616,15 +635,9 @@ async function gerarResumoDiario() {
     }
 
     const totalRecebido = totalPix + totalDinheiro + totalOutros;
-
-    // Total em aberto = tudo que foi vendido hoje e ainda não foi pago
-    // = vendas do dia - recebido do dia
-    // (pagamentos de dívidas de dias anteriores recebidos hoje NÃO entram em totalVendas,
-    //  por isso usamos o saldo geral como referência para o campo "Total em aberto")
     const rows        = await getRows('Saldo', HDR_SALDO);
     const totalAberto = rows.reduce((s, r) => s + parseFloat(r.Total || '0'), 0);
 
-    // Monta linha de recebido
     const linhasRecebido = [];
     if (totalPix > 0)      linhasRecebido.push(`  💳 Pix: R$ ${totalPix.toFixed(2)}`);
     if (totalDinheiro > 0) linhasRecebido.push(`  💵 Dinheiro: R$ ${totalDinheiro.toFixed(2)}`);
