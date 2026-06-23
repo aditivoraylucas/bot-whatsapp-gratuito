@@ -49,9 +49,8 @@ function corrigirTranscricao(texto) {
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
   try {
-    const fetch = (await import('node-fetch')).default;
-    const ext   = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
-    const form  = new FormData();
+    const ext  = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
+    const form = new FormData();
     form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
