@@ -9,7 +9,7 @@ const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ────────────────────────────────────────────────────────────────
+// ── Estado compartilhado ───────────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -29,7 +29,7 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Helper: normaliza o array de env-vars da Render API ─────────────────────────
+// ── Helper: normaliza o array de env-vars da Render API ─────────────────────
 function normalizarEnvVars(raw) {
   if (!Array.isArray(raw)) raw = raw?.envVars || [];
   return raw
@@ -58,7 +58,7 @@ async function putEnvVarsRender(novas) {
   if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
 }
 
-// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────────
+// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────
 function limparSessaoLocal() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
@@ -75,14 +75,19 @@ async function limparSessaoNoRender() {
     const novas = existente.filter(v => v.key !== 'CREDS_JSON');
     await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON removido da Render API.');
-    // Invalida também o process.env local para não reutilizar na mesma instância
     delete process.env.CREDS_JSON;
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
-// ── Sessão persistente ──────────────────────────────────────────────────────────────────
+// ── Valida se uma string é JSON válido ────────────────────────────────────
+function isJsonValido(str) {
+  if (!str || typeof str !== 'string' || str.trim() === '') return false;
+  try { JSON.parse(str); return true; }
+  catch { return false; }
+}
+
+// ── Sessão persistente ─────────────────────────────────────────────────────────────
 function restaurarSessao() {
-  // Se a sessão foi invalidada por logout, não restaura — aguarda novo pairing
   if (sessaoInvalidada) {
     console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
     return false;
@@ -90,12 +95,26 @@ function restaurarSessao() {
   try {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (fs.existsSync(credsPath)) {
-      console.log('[restaurarSessao] Usando creds.json local existente.');
-      return true;
+      // Valida o creds.json local antes de usar
+      const conteudoLocal = fs.readFileSync(credsPath, 'utf8');
+      if (!isJsonValido(conteudoLocal)) {
+        console.warn('[restaurarSessao] creds.json local inválido/corrompido — descartando.');
+        fs.unlinkSync(credsPath);
+        // cai no bloco CREDS_JSON abaixo
+      } else {
+        console.log('[restaurarSessao] Usando creds.json local existente.');
+        return true;
+      }
     }
     const credsJson = process.env.CREDS_JSON;
     if (!credsJson) {
       console.log('[restaurarSessao] CREDS_JSON não definido – será necessário novo pairing.');
+      return false;
+    }
+    // Valida o CREDS_JSON do env antes de escrever no disco
+    if (!isJsonValido(credsJson)) {
+      console.warn('[restaurarSessao] CREDS_JSON inválido/corrompido — ignorando e aguardando novo pairing.');
+      delete process.env.CREDS_JSON;
       return false;
     }
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
@@ -118,15 +137,15 @@ async function salvarSessaoNoRender() {
       { key: 'CREDS_JSON', value: conteudo },
     ];
     await putEnvVarsRender(novas);
-    process.env.CREDS_JSON = conteudo; // atualiza local também
+    process.env.CREDS_JSON = conteudo;
     console.log('[sessão] CREDS_JSON atualizado na Render API.');
   } catch (e) { console.error('[sessão] Erro ao salvar sessao:', e.message); }
 }
 
-// ── Determina se o disconnect exige limpeza total de sessão ──────────────────────────
+// ── Determina se o disconnect exige limpeza total de sessão ────────────────────────
 function precisaLimparSessao(statusCode, errorMessage) {
-  if (statusCode === DisconnectReason.loggedOut)           return true; // 401
-  if (statusCode === DisconnectReason.multideviceMismatch) return true; // 411
+  if (statusCode === DisconnectReason.loggedOut)           return true;
+  if (statusCode === DisconnectReason.multideviceMismatch) return true;
   if (errorMessage && (
     errorMessage.includes('Bad MAC') ||
     errorMessage.includes('bad mac') ||
@@ -135,9 +154,8 @@ function precisaLimparSessao(statusCode, errorMessage) {
   return false;
 }
 
-// ── iniciarBot ────────────────────────────────────────────────────────────────────
+// ── iniciarBot ─────────────────────────────────────────────────────────────────
 async function iniciarBot() {
-  // Se sessão invalidada, apenas inicializa sem credenciais (aguarda pairing)
   if (!sessaoInvalidada) {
     restaurarSessao();
   }
@@ -177,7 +195,7 @@ async function iniciarBot() {
     if (connection === 'open') {
       botConectado        = true;
       pairingPendente     = false;
-      sessaoInvalidada    = false; // conexão bem-sucedida: libera restauração futura
+      sessaoInvalidada    = false;
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRender();
@@ -216,10 +234,8 @@ async function iniciarBot() {
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
-        // Marca sessão como invalidada: não tenta restaurar do CREDS_JSON
         sessaoInvalidada = true;
         console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento pelo formulário web...');
-        // Reinicia sem credenciais para ficar pronto para receber pairing code
         setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
