@@ -27,19 +27,12 @@ function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
 // ── Helper: normaliza o array de env-vars da Render API ─────────────────────────────
-// A Render API v1 retorna [{envVar:{key,value}}, ...] ou [{key,value}, ...]
-// dependendo da versão. Esta função normaliza os dois formatos.
+// Render API v1 retorna [{envVar:{key,value},cursor:"..."}, ...]
 function normalizarEnvVars(raw) {
-  if (!Array.isArray(raw)) {
-    // Pode vir como { envVars: [...] }
-    raw = raw?.envVars || [];
-  }
-  return raw.map(item => {
-    // Formato novo: { envVar: { key, value } }
-    if (item.envVar) return { key: item.envVar.key, value: item.envVar.value };
-    // Formato antigo: { key, value }
-    return { key: item.key, value: item.value };
-  }).filter(v => v.key && v.key.trim() !== '');
+  if (!Array.isArray(raw)) raw = raw?.envVars || [];
+  return raw
+    .map(item => item.envVar ? { key: item.envVar.key, value: item.envVar.value } : { key: item.key, value: item.value })
+    .filter(v => v.key && v.key.trim() !== '');
 }
 
 async function buscarEnvVarsRender() {
@@ -47,15 +40,13 @@ async function buscarEnvVarsRender() {
     headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
   });
   if (!resGet.ok) throw new Error(`Render GET env-vars falhou: ${resGet.status}`);
-  const raw   = await resGet.json();
-  console.log('[Render API] raw env-vars sample:', JSON.stringify(raw).slice(0, 200));
+  const raw  = await resGet.json();
   const lista = normalizarEnvVars(raw);
   console.log(`[Render API] ${lista.length} env-vars encontradas.`);
   return lista;
 }
 
 async function putEnvVarsRender(novas) {
-  // Converte para o formato que a Render API espera no PUT
   const payload = novas.map(v => ({ key: v.key, value: v.value }));
   const resPut = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
     method: 'PUT',
@@ -63,7 +54,6 @@ async function putEnvVarsRender(novas) {
     body: JSON.stringify(payload),
   });
   if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
-  return resPut;
 }
 
 // ── Limpa sessão corrompida (401 / loggedOut) ───────────────────────────────
@@ -108,15 +98,11 @@ function restaurarSessao() {
 
 async function salvarSessaoNoRender() {
   try {
-    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
-      console.warn('[sessão] RENDER_API_KEY ou RENDER_SERVICE_ID não definidos.');
-      return;
-    }
+    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
     const credsPath = path.join(AUTH_DIR, 'creds.json');
-    if (!fs.existsSync(credsPath)) { console.warn('[sessão] creds.json não encontrado.'); return; }
+    if (!fs.existsSync(credsPath)) return;
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     if (conteudo === process.env.CREDS_JSON) return;
-
     const existente = await buscarEnvVarsRender();
     const novas = [
       ...existente.filter(v => v.key !== 'CREDS_JSON'),
@@ -128,16 +114,25 @@ async function salvarSessaoNoRender() {
 }
 
 // ── Determina se o disconnect exige limpeza total de sessão ─────────────────────────
+//
+// Códigos que LIMPAM a sessão (sessão realmente inválida):
+//   401 loggedOut          — você desconectou pelo telefone
+//   411 multideviceMismatch — conflito de dispositivo
+//   Bad MAC / decrypt fail  — chaves corrompidas
+//
+// Códigos que NÃO limpam (apenas reconectam):
+//   515 Stream Errored      — restart normal do stream do WhatsApp (NÃO é logout)
+//   408 / timedOut          — timeout de conexão
+//   outros                  — quedas de rede, etc.
 function precisaLimparSessao(statusCode, errorMessage) {
   if (statusCode === DisconnectReason.loggedOut)           return true; // 401
   if (statusCode === DisconnectReason.multideviceMismatch) return true; // 411
-  if (statusCode === 515) return true;
   if (errorMessage && (
     errorMessage.includes('Bad MAC') ||
     errorMessage.includes('bad mac') ||
-    errorMessage.includes('Failed to decrypt') ||
-    errorMessage.includes('401')
+    errorMessage.includes('Failed to decrypt')
   )) return true;
+  // 515 (Stream Errored) e outros: apenas reconectar, sem limpar
   return false;
 }
 
