@@ -1,4 +1,4 @@
-// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────────────
+// ─── HANDLERS DE MENSAGENS ──────────────────────────────────────────────────────────────
 // ÂNCORAS:
 //   [ANCHOR:CORRECOES-VOZ]  — dicionário de correções de transcrição
 //   [ANCHOR:TRANSCRICAO]    — transcrição de áudio via Groq Whisper
@@ -53,13 +53,13 @@ function corrigirTranscricao(texto) {
   return texto.split(/\s+/).map(p => corrigirPalavra(p)).join(' ');
 }
 
-// ── [ANCHOR:TRANSCRICAO] Transcrição de áudio via Groq Whisper ───────────────
+// ── [ANCHOR:TRANSCRICAO] Transcrição de áudio via Groq Whisper ─────────────
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
   try {
-    const fetch = (await import('node-fetch')).default;
-    const ext   = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
-    const form  = new FormData();
+    // usa fetch nativo do Node 18+ (não precisa de node-fetch)
+    const ext  = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
+    const form = new FormData();
     form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
@@ -82,7 +82,7 @@ async function transcreverAudio(audioBuffer, mimeType) {
   } catch (e) { console.error('Erro transcrição Groq:', e.message); return null; }
 }
 
-// ── [ANCHOR:PARSER-COMPRA] Parsers de compra e pagamento ─────────────────────
+// ── [ANCHOR:PARSER-COMPRA] Parsers de compra e pagamento ─────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -156,7 +156,7 @@ function parsearPagamento(linha) {
   return null;
 }
 
-// ── [ANCHOR:CMDS-PRODUTO] Comandos de produto/preço ──────────────────────────
+// ── [ANCHOR:CMDS-PRODUTO] Comandos de produto/preço ──────────────────────
 function mudarPreco(produto, novoPreco) {
   const p = toProduto(produto);
   if (!p) return `❌ Produto *${produto}* não encontrado.`;
@@ -184,7 +184,7 @@ function listarProdutos() {
   return msg + '───────────────\n_Para mudar o preço: preco [produto] [valor]_';
 }
 
-// ── [ANCHOR:AJUDA] mensagemAjuda ──────────────────────────────────────────────
+// ── [ANCHOR:AJUDA] mensagemAjuda ────────────────────────────────────────────
 function mensagemAjuda() {
   return [
     '*Bot de Vendas 🥇*','───────────────',
@@ -201,7 +201,7 @@ function mensagemAjuda() {
   ].join('\n');
 }
 
-// ── [ANCHOR:PROCESSADOR] processarTexto principal ────────────────────────────
+// ── [ANCHOR:PROCESSADOR] processarTexto principal ────────────────────────
 async function processarTexto(texto, jid, sock) {
   if (!texto) return null;
   const t        = norm(texto);
