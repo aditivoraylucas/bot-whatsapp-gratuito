@@ -1,6 +1,12 @@
-// ─── ENTRADA PRINCIPAL ──────────────────────────────────────────────────────────────
-process.on('uncaughtException',  err => console.error('Erro nao tratado:',   err.message));
-process.on('unhandledRejection', err => console.error('Promise rejeitada:', err?.message || err));
+// ─── ENTRADA PRINCIPAL ───────────────────────────────────────────────────────
+process.on('uncaughtException',  err => {
+  console.error('Erro nao tratado:', err.message);
+  console.error('Stack:', err.stack);
+});
+process.on('unhandledRejection', err => {
+  console.error('Promise rejeitada:', err?.message || err);
+  console.error('Stack:', err?.stack || '');
+});
 
 // Inicia o servidor HTTP (health + pairing)
 const health = require('./src/health');
