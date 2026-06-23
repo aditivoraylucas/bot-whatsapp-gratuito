@@ -25,7 +25,8 @@ const CORRECOES_VOZ = {
   'istorico':'historico',
   'cancelado':'cancelar','cancela':'cancelar','cancelas':'cancelar',
   'zera':'zerar','ajudas':'ajuda','produto':'produtos',
-  'pagol':'pagou','pago':'pagou',
+  'pagol':'pagou',
+  // NOTA: 'pago' NÃO é corrigido para 'pagou' — "pago no pix" é venda à vista, não pagamento de dívida
   'pics':'pix','pik':'pix',
   'transferio':'transferiu','transferiou':'transferiu',
   'bombon':'bombom',
@@ -150,13 +151,15 @@ function extrairMetodo(texto) {
  *   "Calor 2 trufas pago pix"
  *   "Raylucas 1 bombom pago dinheiro"
  *   "Ana 3 trufas pago"
+ *   "Lucas uma trufa e um bombom pago no pix"
  *
- * Retorna { nome, itens, metodo } ou null.
+ * Retorna { nome, itens, metodo } com itens agrupados por produto, ou null.
  */
 function parsearVendaVista(linha) {
   const tNorm = norm(linha);
 
-  // Se contiver keyword de pagamento de dívida ANTES de qualquer produto, não é venda à vista
+  // Se contiver keyword de pagamento de dívida (sem "pago"), não é venda à vista.
+  // "pago" foi removido do CORRECOES_VOZ para não virar "pagou" antes de chegar aqui.
   const kwDivida = /\b(pagou|transferiu|depositou|mandou|enviou)\b/;
   if (kwDivida.test(tNorm)) return null;
 
@@ -170,17 +173,27 @@ function parsearVendaVista(linha) {
   // Extrai o método antes de limpar a linha
   const metodo = extrairMetodo(linha);
 
-  // Remove as KW_VISTA da linha para deixar apenas nome + itens
+  // Remove as KW_VISTA e palavras de preposição ("no", "na", "em") da linha
   let linhaLimpa = tNorm;
   for (const kw of KW_VISTA) {
     linhaLimpa = linhaLimpa.replace(new RegExp(`\\b${kw}\\b`, 'g'), ' ');
   }
+  // Remove preposições soltas que ficam após remover "pix", "pago", etc.
+  linhaLimpa = linhaLimpa.replace(/\b(no|na|em|pelo|pela)\b/g, ' ');
   linhaLimpa = linhaLimpa.replace(/\s+/g, ' ').trim();
 
   const resultado = parsearLinha(linhaLimpa);
   if (!resultado) return null;
 
-  return { ...resultado, metodo };
+  // ── Agrupa itens com o mesmo produto (evita duplicatas por sinônimos) ──
+  const mapa = new Map();
+  for (const item of resultado.itens) {
+    const qtdAtual = mapa.get(item.produto) || 0;
+    mapa.set(item.produto, qtdAtual + item.quantidade);
+  }
+  const itensAgrupados = [...mapa.entries()].map(([produto, quantidade]) => ({ produto, quantidade }));
+
+  return { ...resultado, itens: itensAgrupados, metodo };
 }
 
 function parsearPagamento(linha) {
