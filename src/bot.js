@@ -1,4 +1,4 @@
-// ─── LÓGICA DO WHATSAPP / BAILEYS ────────────────────────────────────────────
+// ─── LÓGICA DO WHATSAPP / BAILEYS ──────────────────────────────────────────────────
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const fs   = require('fs');
 const path = require('path');
@@ -9,7 +9,7 @@ const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ──────────────────────────────────────────────────────
+// ── Estado compartilhado ──────────────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -26,7 +26,7 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────
+// ── Limpa sessão corrompida (401 / loggedOut) ───────────────────────────────
 function limparSessaoLocal() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
@@ -56,7 +56,7 @@ async function limparSessaoNoRender() {
   } catch (e) { console.error('Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
-// ── Sessão persistente ──────────────────────────────────────────────────────────
+// ── Sessão persistente ─────────────────────────────────────────────────────���───────────
 function restaurarSessao() {
   try {
     const credsPath = path.join(AUTH_DIR, 'creds.json');
@@ -90,7 +90,6 @@ async function salvarSessaoNoRender() {
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     if (conteudo === process.env.CREDS_JSON) return;
 
-    // Busca variáveis atuais
     const resGet = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
       headers: { 'Authorization': `Bearer ${RENDER_API_KEY}`, 'Accept': 'application/json' },
     });
@@ -102,7 +101,6 @@ async function salvarSessaoNoRender() {
     const envVars   = await resGet.json();
     const existente = Array.isArray(envVars) ? envVars : (envVars.envVars || []);
 
-    // Filtra chaves vazias e remove CREDS_JSON antigo, depois adiciona o novo
     const novas = [
       ...existente
         .filter(v => v.key && v.key.trim() !== '' && v.key !== 'CREDS_JSON')
@@ -124,7 +122,23 @@ async function salvarSessaoNoRender() {
   } catch (e) { console.error('Erro ao salvar sessao na Render API:', e.message); }
 }
 
-// ── iniciarBot ───────────────────────────────────────────────────────────────
+// ── Determina se o disconnect exige limpeza total de sessão ─────────────────────────
+// Cobre: logout explícito (401), stream error (515), Bad MAC / sessão corrompida
+function precisaLimparSessao(statusCode, errorMessage) {
+  if (statusCode === DisconnectReason.loggedOut)    return true; // 401 - desconectado pelo telefone
+  if (statusCode === DisconnectReason.multideviceMismatch) return true; // 411
+  if (statusCode === 515) return true; // Stream error — sessão válida mas stream reiniciado pelo WA
+  if (errorMessage && (
+    errorMessage.includes('Bad MAC') ||
+    errorMessage.includes('bad mac') ||
+    errorMessage.includes('Failed to decrypt') ||
+    errorMessage.includes('invalid') ||
+    errorMessage.includes('401')
+  )) return true;
+  return false;
+}
+
+// ── iniciarBot ───────────────────────────────────────────────────────────────────────
 async function iniciarBot() {
   restaurarSessao();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -188,18 +202,23 @@ async function iniciarBot() {
     if (connection === 'close') {
       botConectado          = false;
       agendamentosIniciados = false;
-      const statusCode      = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut       = statusCode === DisconnectReason.loggedOut;
-      console.log(`Conexão fechada (código: ${statusCode}). Reconectando: ${!loggedOut}`);
 
-      if (loggedOut) {
-        console.log('[sessão] Sessão expirada/inválida. Limpando credenciais...');
+      const statusCode   = lastDisconnect?.error?.output?.statusCode;
+      const errorMessage = lastDisconnect?.error?.message || '';
+      const deveLinpar   = precisaLimparSessao(statusCode, errorMessage);
+
+      console.log(`[conexão] Fechada — código: ${statusCode} | msg: ${errorMessage.slice(0, 80)} | limpar: ${deveLinpar}`);
+
+      if (deveLinpar) {
+        console.log('[sessão] Sessão inválida detectada. Limpando credenciais e aguardando novo pairing...');
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
-        setTimeout(iniciarBot, 3000);
+        // Aguarda 5s antes de reiniciar para garantir que o Render não salve o CREDS_JSON antigo
+        setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
+        // Backoff exponencial: 5s, 10s, 20s, 30s (máx)
         const delay = Math.min(5000 * tentativasReconexao, 30000);
         console.log(`[reconexão] Tentativa ${tentativasReconexao} em ${delay / 1000}s...`);
         setTimeout(iniciarBot, delay);
