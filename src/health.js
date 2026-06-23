@@ -1,4 +1,4 @@
-// ─── SERVIDOR HTTP (health, webhook, pairing) ─────────────────────────────────
+// ─── SERVIDOR HTTP (health, webhook, pairing) ──────────────────────────────
 const http   = require('http');
 const crypto = require('crypto');
 const { PORT, GITHUB_WEBHOOK_SECRET, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY } = require('./config');
@@ -18,9 +18,11 @@ function init({ getBotConectado, getSockGlobal, getPairingNumero, setPairingPend
   _setPairingNumero   = setPairingNumero;
 }
 
-// ── Self-ping: evita hibernação do Render Free ────────────────────────────────
-// Faz uma requisição para /ping a cada 10 minutos.
-// O Render hiberna serviços gratuitos após ~15min sem tráfego.
+// ── Rate limit pairing: 1 tentativa por minuto ──────────────────────────
+let _ultimoPairingTs = 0;
+const PAIRING_COOLDOWN_MS = 60_000;
+
+// ── Self-ping: evita hibernação do Render Free ────────────────────────
 function iniciarSelfPing() {
   const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
   const INTERVALO  = 10 * 60 * 1000; // 10 minutos
@@ -37,7 +39,7 @@ function iniciarSelfPing() {
   console.log(`[self-ping] Iniciado — ping a cada 10min para ${RENDER_URL}/ping`);
 }
 
-// ── Diagnóstico Google Sheets ──────────────────────────────────────────────
+// ── Diagnóstico Google Sheets ────────────────────────────────────
 async function testarPlanilha() {
   const resultado = {
     spreadsheet_id:    SPREADSHEET_ID || '❌ VAZIO',
@@ -96,7 +98,7 @@ async function testarPlanilha() {
   return resultado;
 }
 
-// ── Páginas HTML de pareamento ────────────────────────────────────────────────
+// ── Páginas HTML de pareamento ────────────────────────────────────────
 function paginaPairing(estado) {
   if (estado === 'conectado') {
     return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bot Vendas</title>
@@ -131,10 +133,10 @@ function paginaPairing(estado) {
   </div></body></html>`;
 }
 
-// ── Servidor HTTP ────────────────────────────────────────────────────────────────
+// ── Servidor HTTP ──────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   try {
-    // GET /ping — usado pelo self-ping e pelo UptimeRobot
+    // GET /ping
     if (req.method === 'GET' && req.url === '/ping') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ pong: true, ts: Date.now(), conectado: _getBotConectado() }));
@@ -155,7 +157,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // GET /test-sheets — diagnóstico completo da planilha
+    // GET /test-sheets
     if (req.method === 'GET' && req.url === '/test-sheets') {
       const r = await testarPlanilha();
       const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
@@ -207,8 +209,22 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // POST /parear
+    // POST /parear — com rate limit de 60s
     if (req.method === 'POST' && req.url === '/parear') {
+      const agora = Date.now();
+      if (agora - _ultimoPairingTs < PAIRING_COOLDOWN_MS) {
+        const restante = Math.ceil((PAIRING_COOLDOWN_MS - (agora - _ultimoPairingTs)) / 1000);
+        res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Aguarde</title>
+          <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff7ed}
+          .card{background:#fff;border-radius:16px;padding:40px;box-shadow:0 4px 24px #0001;text-align:center;max-width:380px}
+          h2{color:#d97706} p{color:#555;margin:12px 0} a{color:#16a34a;font-weight:600}</style></head>
+          <body><div class="card"><h2>⏳ Aguarde ${restante}s</h2>
+          <p>Por segurança, só é possível solicitar um código por minuto.</p>
+          <a href="/">← Voltar</a></div></body></html>`);
+        return;
+      }
+
       const chunks = [];
       req.on('data', chunk => chunks.push(chunk));
       req.on('end', async () => {
@@ -216,6 +232,7 @@ const server = http.createServer(async (req, res) => {
         const params = new URLSearchParams(body);
         const numero = (params.get('numero') || '').replace(/\D/g, '').trim();
         if (!numero || numero.length < 10) { res.writeHead(302, { Location: '/' }); res.end(); return; }
+        _ultimoPairingTs = Date.now(); // marca ANTES de tentar
         _setPairingNumero(numero);
         _setPairingPendente(true);
         try {
@@ -281,7 +298,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`✅ Servidor rodando na porta ${PORT}`);
-  // Inicia o self-ping após 30s (aguarda o servidor estabilizar)
   setTimeout(iniciarSelfPing, 30_000);
 });
 
