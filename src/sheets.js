@@ -13,7 +13,7 @@ const {
   ULTIMOS_LANCAMENTOS, pushLancamento,
 } = require('./utils');
 
-// ── Token OAuth cacheado ────────────────────────────────────────────
+// ── Token OAuth cacheado ───────────────────────────────────────────────────────────────────
 let _tokenCache = null;
 let _tokenExpiry = 0;
 
@@ -59,7 +59,7 @@ async function getAccessToken() {
   return _tokenCache;
 }
 
-// ── Helpers REST ──────────────────────────────────────────────────
+// ── Helpers REST ─────────────────────────────────────────────────────────────────────────────
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`;
 
 console.log('[sheets] BASE URL:', BASE);
@@ -106,7 +106,7 @@ async function sheetsDELETE(path, body) {
   return r.json();
 }
 
-// ── Estrutura da planilha ───────────────────────────────────────────────
+// ── Estrutura da planilha ───────────────────────────────────────────────────────────────────────
 const HDR_SALDO    = ['Cliente','Produto','Quantidade','Total','UltimaCompra'];
 const HDR_HIST     = ['Data','Cliente','Tipo','Produto','Quantidade','Valor'];
 
@@ -227,6 +227,34 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
       return { cliente, totalAcumulado: valorNovo, qtdAcumulada: quantidade };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
+}
+
+// ── Venda à vista: grava Compra + Pagamento no Histórico, sem tocar no Saldo ────────────────
+async function registrarVendaVista(clienteEnviado, produto, quantidade) {
+  try {
+    const meta     = await getSheetsMeta();
+    await ensureSaldoSheet(meta);
+    const histProp = await getOrCreateHistSheet(meta);
+    await ensureHeaders('Historico', HDR_HIST, histProp.sheetId);
+
+    const cliente   = capitalizarNome(clienteEnviado);
+    const preco     = PRECOS[produto] || 0;
+    const valor     = preco * quantidade;
+    const dataAgora = agora();
+
+    // Grava a compra no histórico
+    await appendRow('Historico', HDR_HIST, {
+      Data: dataAgora, Cliente: cliente, Tipo: 'Compra',
+      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2),
+    });
+    // Grava o pagamento imediato no histórico
+    await appendRow('Historico', HDR_HIST, {
+      Data: dataAgora, Cliente: cliente, Tipo: 'Pagamento',
+      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2),
+    });
+
+    return { cliente, valor };
+  } catch (err) { console.error('Erro venda à vista:', err.message); return null; }
 }
 
 async function cancelarLancamento(jid, nomeDigitado) {
@@ -619,7 +647,7 @@ async function zerarCliente(nomeDigitado) {
 
 module.exports = {
   getDoc: async () => ({}), getSheetSaldo: async () => ({}), getSheetHistorico: async () => ({}),
-  registrarOuAcumular, cancelarLancamento,
+  registrarOuAcumular, registrarVendaVista, cancelarLancamento,
   processarPagamentoProduto, processarPagamentoValor,
   gerarRelatorioGeral, gerarRelatorioDetalhado, gerarRelatorioQuitados,
   gerarSaldoIndividual, gerarHistoricoCliente, gerarRelatorioMes,

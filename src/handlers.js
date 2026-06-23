@@ -1,4 +1,4 @@
-// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────
+// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────────────────────
 const FormData = require('form-data');
 const { GROQ_API_KEY, LIMITE_CREDITO_PADRAO } = require('./config');
 const {
@@ -10,13 +10,14 @@ const {
 } = require('./utils');
 const {
   registrarOuAcumular, cancelarLancamento,
+  registrarVendaVista,
   processarPagamentoProduto, processarPagamentoValor,
   gerarRelatorioGeral, gerarRelatorioDetalhado, gerarRelatorioQuitados,
   gerarSaldoIndividual, gerarHistoricoCliente, gerarRelatorioMes,
   gerarResumoDiario, zerarCliente,
 } = require('./sheets');
 
-// ── Correções de transcrição de voz ────────────────────────────────────────
+// ── Correções de transcrição de voz ────────────────────────────────────────────────
 const CORRECOES_VOZ = {
   'saudo':'saldo','saud':'saldo','salvo':'saldo','salda':'saldo','saldos':'saldo',
   'relatorios':'relatorio','relato':'relatorio',
@@ -45,7 +46,7 @@ function corrigirTranscricao(texto) {
   return texto.split(/\s+/).map(p => corrigirPalavra(p)).join(' ');
 }
 
-// ── Transcrição de áudio via Groq Whisper ─────────────────────────────────
+// ── Transcrição de áudio via Groq Whisper ─────────────────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
   try {
@@ -61,6 +62,7 @@ async function transcreverAudio(audioBuffer, mimeType) {
       'Produtos: trufa, trufas, bolo, bolos, bombom, bombons.',
       'Exemplos: "julia 1 bolo", "ana 3 trufas", "carlos 2 bolos", "maria pagou 10",',
       '"pedro pix 15", "joao pagou 2 trufas", "relatorio", "resumo", "cancelar julia".',
+      '"calor 2 trufas pago pix", "raylucas 1 bombom pago dinheiro" (venda à vista).',
       'Os nomes são nomes próprios brasileiros. Os números são quantidades pequenas (1 a 20).',
     ].join(' ');
     form.append('prompt', promptWhisper);
@@ -75,7 +77,7 @@ async function transcreverAudio(audioBuffer, mimeType) {
   } catch (e) { console.error('Erro transcrição Groq:', e.message); return null; }
 }
 
-// ── Parser de compra ────────────────────────────────────────────────────────────
+// ── Parser de compra ────────────────────────────────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -114,6 +116,52 @@ function parsearLinha(linha) {
   return { nome: capitalizarNome(nomeRaw), itens };
 }
 
+// ── Palavras-chave que indicam pagamento imediato (à vista) ───────────────────────────────
+const KW_VISTA = new Set([
+  'pago','paga','vista','avista','dinheiro','especie',
+  'pix','debito','credito','cartao',
+]);
+
+/**
+ * Detecta frases do tipo:
+ *   "Calor 2 trufas pago pix"
+ *   "Raylucas 1 bombom pago dinheiro"
+ *   "Ana 3 trufas pago"
+ *
+ * Regra: a linha deve conter produto(s) + quantidade(s) E ao menos uma KW_VISTA
+ * DEPOIS do bloco de itens (ou misturado ao final), SEM palavras-chave de
+ * pagamento de dívida (pagou / transferiu / depositou) antes do produto.
+ *
+ * Retorna { nome, itens } ou null.
+ */
+function parsearVendaVista(linha) {
+  const tNorm = norm(linha);
+
+  // Se contiver keyword de pagamento de dívida ANTES de qualquer produto, não é venda à vista
+  const kwDivida = /\b(pagou|transferiu|depositou|mandou|enviou)\b/;
+  if (kwDivida.test(tNorm)) return null;
+
+  // Deve conter ao menos uma KW_VISTA
+  const temVista = [...KW_VISTA].some(kw => {
+    const re = new RegExp(`\\b${kw}\\b`);
+    return re.test(tNorm);
+  });
+  if (!temVista) return null;
+
+  // Remove as KW_VISTA da linha para deixar apenas nome + itens
+  let linhaLimpa = tNorm;
+  for (const kw of KW_VISTA) {
+    linhaLimpa = linhaLimpa.replace(new RegExp(`\\b${kw}\\b`, 'g'), ' ');
+  }
+  linhaLimpa = linhaLimpa.replace(/\s+/g, ' ').trim();
+
+  // Reutiliza parsearLinha com a linha sem as KW_VISTA
+  const resultado = parsearLinha(linhaLimpa);
+  if (!resultado) return null;
+
+  return resultado; // { nome, itens }
+}
+
 function parsearPagamento(linha) {
   const tNorm = norm(linha);
   if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
@@ -149,7 +197,7 @@ function parsearPagamento(linha) {
   return null;
 }
 
-// ── Comandos de produto/preço ─────────────────────────────────────────────────
+// ── Comandos de produto/preço ───────────────────────────────────────────────────────────────────────
 function mudarPreco(produto, novoPreco) {
   const p = toProduto(produto);
   if (!p) return `❌ Produto *${produto}* não encontrado.`;
@@ -184,8 +232,9 @@ function listarProdutos() {
 function mensagemAjuda() {
   return [
     '*Bot de Vendas 🥇*','───────────────',
-    '*Registrar compra:*','  `julia 2 trufas`','  `carlos 1 bolo 3 trufas`','',
-    '*Registrar pagamento:*','  `julia pagou 10`','  `carlos pix 15`','  `ana pagou 2 trufas`','',
+    '*Registrar compra (fiado):*','  `julia 2 trufas`','  `carlos 1 bolo 3 trufas`','',
+    '*Venda à vista (pago na hora):*','  `julia 2 trufas pago`','  `carlos 1 bolo pago pix`','  `ana 3 trufas pago dinheiro`','',
+    '*Registrar pagamento de dívida:*','  `julia pagou 10`','  `carlos pix 15`','  `ana pagou 2 trufas`','',
     '*Relatórios:*','  `relatorio` — geral','  `relatorio detalhado`','  `relatorio quitados`','  `relatorio junho`','  `resumo` — resumo do dia','',
     '*Consultas:*','  `saldo julia`','  `historico carlos`','',
     '*Outros:*',
@@ -197,7 +246,7 @@ function mensagemAjuda() {
   ].join('\n');
 }
 
-// ── Processador principal de texto ─────────────────────────────────────────────
+// ── Processador principal de texto ───────────────────────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
   if (!texto) return null;
   const t        = norm(texto);
@@ -205,9 +254,9 @@ async function processarTexto(texto, jid, sock) {
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
   if (p0 === 'relatorio' || p0 === 'relatorios') {
-    if (p1 === 'detalhado')                   return await gerarRelatorioDetalhado();
+    if (p1 === 'detalhado')                    return await gerarRelatorioDetalhado();
     if (p1 === 'quitados' || p1 === 'quitado') return await gerarRelatorioQuitados();
-    if (p1 && isMes(p1))                      return await gerarRelatorioMes(p1);
+    if (p1 && isMes(p1))                       return await gerarRelatorioMes(p1);
     return await gerarRelatorioGeral();
   }
   if (p0 === 'resumo')               return await gerarResumoDiario();
@@ -219,9 +268,9 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'produtos')             return listarProdutos();
 
   if (p0 === 'preco' && p1) {
-    const prodTrecho   = palavras.slice(1, -1).join(' ');
+    const prodTrecho    = palavras.slice(1, -1).join(' ');
     const ultimaPalavra = palavras[palavras.length - 1];
-    const novoPreco    = extrairValor(ultimaPalavra);
+    const novoPreco     = extrairValor(ultimaPalavra);
     if (novoPreco && novoPreco > 0) return mudarPreco(prodTrecho, novoPreco);
     const prodTudo = palavras.slice(1).join(' ');
     const v2       = extrairValor(prodTudo);
@@ -233,6 +282,20 @@ async function processarTexto(texto, jid, sock) {
     const ultimaP = partes[partes.length - 1];
     const preco   = extrairValor(ultimaP);
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
+  }
+
+  // ── Venda à vista (pago na hora) — verificar ANTES do pagamento de dívida ──
+  const vista = parsearVendaVista(texto);
+  if (vista) {
+    const msgs = [];
+    for (const item of vista.itens) {
+      const res = await registrarVendaVista(vista.nome, item.produto, item.quantidade);
+      if (!res) { msgs.push(`❌ Erro ao registrar venda à vista de ${vista.nome}.`); continue; }
+      const valor = (PRECOS[item.produto] || 0) * item.quantidade;
+      pushLancamento(jid, { tipo: 'compra', cliente: res.cliente, produto: item.produto, quantidade: item.quantidade, valor });
+      msgs.push(`💵 *${res.cliente}*: ${item.quantidade} ${nomeProdutoExib(item.produto)}(s) = R$ ${valor.toFixed(2)} _(pago à vista)_`);
+    }
+    return msgs.join('\n');
   }
 
   const pag = parsearPagamento(texto);
