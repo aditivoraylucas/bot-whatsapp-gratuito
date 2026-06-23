@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Aguarde</title>
+  <style>
+    body { font-family: sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #fff7ed; }
+    .card { background: #fff; border-radius: 16px; padding: 40px; box-shadow: 0 4px 24px #0001; text-align: center; max-width: 380px; }
+    h2 { color: #d97706; }
+    p { color: #555; margin: 12px 0; }
+    a { color: #16a34a; font-weight: 600; }
+    #contador { font-size: 1.5em; font-weight: bold; color: #d97706; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>⏳ Aguarde <span id="contador">__SEGUNDOS__</span>s</h2>
+    <p>Por segurança, só é possível solicitar um código por minuto.</p>
+    <a href="/">← Voltar</a>
+  </div>
+  <script>
+    let s = parseInt(document.getElementById('contador').textContent) || 60;
+    const el = document.getElementById('contador');
+    const t = setInterval(() => {
+      s--;
+      el.textContent = s;
+      if (s <= 0) { clearInterval(t); location.href = '/'; }
+    }, 1000);
+  </script>
+</body>
+</html>

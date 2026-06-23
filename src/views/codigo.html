@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Código de Pareamento</title>
+  <style>
+    body { font-family: sans-serif; background: #fffbeb; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #fff; border-radius: 20px; padding: 44px 36px; box-shadow: 0 8px 32px #0002; text-align: center; max-width: 440px; width: 90%; }
+    h1 { color: #d97706; font-size: 1.6em; }
+    .badge { background: #fef3c7; border: 2px solid #f59e0b; border-radius: 14px; padding: 20px 28px; font-size: 2.2em; letter-spacing: 8px; font-weight: bold; color: #92400e; margin: 24px 0; display: inline-block; }
+    ol { text-align: left; color: #374151; line-height: 2; padding-left: 20px; }
+    .sub { font-size: 0.85em; color: #9ca3af; margin-top: 16px; }
+    a { display: inline-block; margin-top: 20px; color: #16a34a; text-decoration: none; font-weight: 600; }
+  </style>
+  <script>
+    // Substituído pelo servidor ao servir a página
+    // __CODE__ e __NUMERO__ são preenchidos dinamicamente
+    setInterval(async () => {
+      const r = await fetch('/status');
+      const d = await r.json();
+      if (d.conectado) location.href = '/';
+    }, 5000);
+  </script>
+</head>
+<body>
+  <div class="card">
+    <h1>📲 Código de Pareamento</h1>
+    <p>Número: <strong id="numero"></strong></p>
+    <p>Abra o WhatsApp → <strong>Configurações → Aparelhos conectados → Conectar com número de telefone</strong></p>
+    <div class="badge" id="code">--------</div>
+    <ol>
+      <li>Abra o WhatsApp no celular</li>
+      <li>Toque em <strong>⋮ Menu → Aparelhos conectados</strong></li>
+      <li>Toque em <strong>Conectar aparelho</strong></li>
+      <li>Escolha <strong>"Conectar com número de telefone"</strong></li>
+      <li>Digite o código acima</li>
+    </ol>
+    <p class="sub">O código expira em ~60 segundos. Esta página detecta a conexão automaticamente.</p>
+    <a href="/">← Tentar com outro número</a>
+  </div>
+  <script>
+    const p = new URLSearchParams(location.search);
+    document.getElementById('code').textContent = p.get('c') || '--------';
+    document.getElementById('numero').textContent = p.get('n') || '';
+  </script>
+</body>
+</html>

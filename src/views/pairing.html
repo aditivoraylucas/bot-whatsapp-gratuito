@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bot Vendas — Pareamento</title>
+  <style>
+    body { font-family: sans-serif; background: linear-gradient(135deg,#dcfce7,#bbf7d0); display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: #fff; border-radius: 20px; padding: 44px 36px; box-shadow: 0 8px 32px #0002; text-align: center; max-width: 420px; width: 90%; }
+    h1 { color: #15803d; font-size: 1.8em; margin-bottom: 6px; }
+    .sub { color: #666; margin-bottom: 28px; font-size: 0.95em; }
+    label { display: block; text-align: left; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    input { width: 100%; box-sizing: border-box; padding: 14px 16px; font-size: 1.1em; border: 2px solid #d1fae5; border-radius: 10px; outline: none; transition: border .2s; }
+    input:focus { border-color: #16a34a; }
+    button { margin-top: 18px; width: 100%; padding: 14px; background: #16a34a; color: #fff; font-size: 1.1em; font-weight: 700; border: none; border-radius: 10px; cursor: pointer; transition: background .2s; }
+    button:hover { background: #15803d; }
+    .hint { font-size: 0.82em; color: #9ca3af; margin-top: 10px; }
+    .logo { font-size: 2.6em; margin-bottom: 8px; }
+    .erro { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 0.9em; display: none; }
+    .erro.visivel { display: block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🤖</div>
+    <h1>Bot de Vendas</h1>
+    <p class="sub">Digite o número do WhatsApp para conectar o bot</p>
+    <div id="msg-erro" class="erro"></div>
+    <form method="POST" action="/parear">
+      <label for="tel">Número de telefone</label>
+      <input type="tel" id="tel" name="numero" placeholder="5511999999999" required autofocus />
+      <p class="hint">Inclua o código do país e DDD. Exemplo: 5511999999999</p>
+      <button type="submit">📲 Receber código no WhatsApp</button>
+    </form>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const erro = params.get('erro');
+    const erros = {
+      bot_nao_iniciado: 'O bot ainda está iniciando. Aguarde alguns segundos e tente novamente.',
+      falha_codigo: 'Não foi possível gerar o código. Verifique se o número está correto.',
+    };
+    if (erro && erros[erro]) {
+      const el = document.getElementById('msg-erro');
+      el.textContent = erros[erro];
+      el.classList.add('visivel');
+    }
+  </script>
+</body>
+</html>
