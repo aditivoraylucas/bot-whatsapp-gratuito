@@ -33,6 +33,8 @@ function init({ getBotConectado, getSockGlobal, getPairingNumero, setPairingPend
 }
 
 // ── [ANCHOR:RATE-LIMIT] 1 tentativa de pairing por minuto ────────────────────
+// IMPORTANTE: o cooldown só é ativado quando o bot está pronto e a requisição
+// é enviada de fato ao WhatsApp. Erros de "bot não iniciado" NÃO consomem o cooldown.
 let _ultimoPairingTs = 0;
 const PAIRING_COOLDOWN_MS = 60_000;
 
@@ -123,6 +125,12 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ conectado: _getBotConectado() }));
     }
 
+    // GET /bot-status — retorna se o sock está pronto para parear
+    if (req.method === 'GET' && req.url === '/bot-status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ pronto: !!_getSockGlobal(), conectado: _getBotConectado() }));
+    }
+
     // GET /test-sheets
     if (req.method === 'GET' && req.url === '/test-sheets') {
       const r = await testarPlanilha();
@@ -161,35 +169,46 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // POST /parear — com rate limit
+    // POST /parear — rate limit só dispara quando bot está pronto
     if (req.method === 'POST' && req.url === '/parear') {
-      const agora = Date.now();
-      if (agora - _ultimoPairingTs < PAIRING_COOLDOWN_MS) {
-        const restante = Math.ceil((PAIRING_COOLDOWN_MS - (agora - _ultimoPairingTs)) / 1000);
-        const html = lerView('rate-limit.html').replace('__SEGUNDOS__', restante);
-        res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end(html);
-      }
       const chunks = [];
       req.on('data', chunk => chunks.push(chunk));
       req.on('end', async () => {
         const params = new URLSearchParams(Buffer.concat(chunks).toString());
         const numero = (params.get('numero') || '').replace(/\D/g, '').trim();
-        if (!numero || numero.length < 10) { res.writeHead(302, { Location: '/' }); return res.end(); }
+        if (!numero || numero.length < 10) {
+          res.writeHead(302, { Location: '/' }); return res.end();
+        }
+
+        // Verifica se o sock está disponível ANTES de checar/ativar rate limit
+        const sock = _getSockGlobal();
+        if (!sock) {
+          // Bot não iniciou ainda — não consome o cooldown, redireciona com erro
+          res.writeHead(302, { Location: '/?erro=bot_nao_iniciado' });
+          return res.end();
+        }
+
+        // Só agora verifica o rate limit (bot está pronto)
+        const agora = Date.now();
+        if (agora - _ultimoPairingTs < PAIRING_COOLDOWN_MS) {
+          const restante = Math.ceil((PAIRING_COOLDOWN_MS - (agora - _ultimoPairingTs)) / 1000);
+          const html = lerView('rate-limit.html').replace('__SEGUNDOS__', restante);
+          res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end(html);
+        }
+
+        // Ativa cooldown e solicita o código
         _ultimoPairingTs = Date.now();
         _setPairingNumero(numero);
         _setPairingPendente(true);
         try {
-          const sock = _getSockGlobal();
-          if (sock) {
-            const code = await sock.requestPairingCode(numero);
-            console.log(`Pairing code para ${numero}:`, code);
-            res.writeHead(302, { Location: `/codigo?c=${encodeURIComponent(code)}&n=${encodeURIComponent(numero)}` });
-            res.end();
-          } else {
-            res.writeHead(302, { Location: '/?erro=bot_nao_iniciado' }); res.end();
-          }
+          const code = await sock.requestPairingCode(numero);
+          console.log(`Pairing code para ${numero}:`, code);
+          res.writeHead(302, { Location: `/codigo?c=${encodeURIComponent(code)}&n=${encodeURIComponent(numero)}` });
+          res.end();
         } catch (e) {
+          // Falhou ao pedir o código — libera o cooldown para nova tentativa
+          _ultimoPairingTs = 0;
           console.error('Erro ao solicitar pairing code:', e.message);
           res.writeHead(302, { Location: '/?erro=falha_codigo' }); res.end();
         }
