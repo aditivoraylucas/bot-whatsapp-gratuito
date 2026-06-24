@@ -14,6 +14,8 @@ const LIMITE_CREDITO_PADRAO        = parseFloat(process.env.LIMITE_CREDITO || '0
 const DIAS_LEMBRETE                = parseInt(process.env.DIAS_LEMBRETE || '7');
 const HORA_LEMBRETE                = parseInt(process.env.HORA_LEMBRETE || '20');
 const HORA_RESUMO                  = parseInt(process.env.HORA_RESUMO   || '21');
+// Horário (0-23, horário de SP) para enviar o relatório automático de devedores
+const HORA_RELATORIO               = parseInt(process.env.HORA_RELATORIO || '9');
 
 // ─── SPREADSHEET_ID: aceita URL completa ou só o ID ──────────────────────────
 const _rawUrl = process.env.SPREADSHEET_URL || process.env.SPREADSHEET_ID || '';
@@ -28,5 +30,5 @@ if (!GOOGLE_PRIVATE_KEY)           console.warn('[config] ⚠️  GOOGLE_PRIVATE
 module.exports = {
   GRUPO_NOME, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY,
   PORT, RENDER_API_KEY, RENDER_SERVICE_ID, GROQ_API_KEY, GITHUB_WEBHOOK_SECRET,
-  AUTH_DIR, LIMITE_CREDITO_PADRAO, DIAS_LEMBRETE, HORA_LEMBRETE, HORA_RESUMO,
+  AUTH_DIR, LIMITE_CREDITO_PADRAO, DIAS_LEMBRETE, HORA_LEMBRETE, HORA_RESUMO, HORA_RELATORIO,
 };
