@@ -4,9 +4,9 @@ const fs   = require('fs');
 const path = require('path');
 const pino = require('pino');
 
-const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO, HORA_RELATORIO } = require('./config');
+const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
 const { horaAtualSP, agoraData, norm } = require('./utils');
-const { verificarLembretes, gerarResumoDiario, gerarRelatorioGeral } = require('./sheets');
+const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
 // ── Estado compartilhado ────────────────────────────────────────────────────────────────
@@ -16,7 +16,6 @@ let jidGrupoGlobal        = null;
 let agendamentosIniciados = false;
 let ultimoDiaLembrete     = '';
 let ultimoDiaResumo       = '';
-let ultimoDiaRelatorio    = ''; // ← sugestão 4: controla envio do relatório diário de devedores
 let pairingPendente       = false;
 let pairingNumero         = '';
 let tentativasReconexao   = 0;
@@ -202,26 +201,6 @@ async function iniciarBot() {
             if (horaNum === HORA_RESUMO && ultimoDiaResumo !== hoje && jidGrupoGlobal) {
               ultimoDiaResumo = hoje;
               await sock.sendMessage(jidGrupoGlobal, { text: await gerarResumoDiario() });
-            }
-
-            // ── Sugestão 4: Relatório automático de devedores ────────────────
-            // Enviado todo dia em HORA_RELATORIO (padrão: 9h)
-            // Só envia se houver ao menos 1 devedor (evita mensagem vazia)
-            if (horaNum === HORA_RELATORIO && ultimoDiaRelatorio !== hoje && jidGrupoGlobal) {
-              ultimoDiaRelatorio = hoje;
-              try {
-                const textoRelatorio = await gerarRelatorioGeral();
-                // gerarRelatorioGeral() retorna mensagem de "nenhuma dívida" quando zerado
-                // Só envia se houver linhas de cliente (heurística: mais de 3 linhas)
-                const linhas = textoRelatorio.split('\n').filter(l => l.trim());
-                if (linhas.length > 3) {
-                  const cabecalho = `📋 *Relatório diário de devedores* — ${hoje}\n\n`;
-                  await sock.sendMessage(jidGrupoGlobal, { text: cabecalho + textoRelatorio });
-                  console.log('[agendamento] Relatório diário enviado.');
-                } else {
-                  console.log('[agendamento] Nenhum devedor hoje — relatório não enviado.');
-                }
-              } catch (e) { console.error('[agendamento] Erro ao enviar relatório diário:', e.message); }
             }
 
           } catch (e) { console.error('Erro agendamento:', e.message); }
