@@ -1,204 +1,28 @@
-// ─── GOOGLE SHEETS via REST API direta (sem google-auth-library) ──────────────
-const crypto = require('crypto');
-
-const {
-  SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY,
-  LIMITE_CREDITO_PADRAO,
-} = require('./config');
-
+// ─── GOOGLE SHEETS — lógica de negócio ────────────────────────────────────────────
+// Responsabilidade: operações de negócio (registrar, pagar, cancelar, zerar).
+// Infra (auth, HTTP, CRUD de linhas) → sheets/auth.js e sheets/core.js
+// Relatórios → sheetsReports.js
+// ─────────────────────────────────────────────────────────────────────────────
+const { LIMITE_CREDITO_PADRAO } = require('./config');
 const {
   comRetry, norm, capitalizarNome, mesmoNome, resolverNome,
   agora, agoraData, soData,
   PRECOS, nomeProdutoExib,
   ULTIMOS_LANCAMENTOS, pushLancamento,
 } = require('./utils');
+const {
+  HDR_SALDO, HDR_HIST,
+  getSheetsMeta, ensureSaldoSheet, ensureHeaders, getOrCreateHistSheet,
+  getRows, appendRow, updateRow, deleteRows,
+} = require('./sheets/core');
 
-// ── Token OAuth cacheado ──────────────────────────────────────────────────────────────────────────────────────
-let _tokenCache = null;
-let _tokenExpiry = 0;
-
-async function getAccessToken() {
-  const agora = Date.now();
-  if (_tokenCache && agora < _tokenExpiry) return _tokenCache;
-
-  const iat = Math.floor(agora / 1000);
-  const exp = iat + 3600;
-  const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({
-    iss:   GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    scope: 'https://www.googleapis.com/auth/spreadsheets',
-    aud:   'https://oauth2.googleapis.com/token',
-    iat,
-    exp,
-  })).toString('base64url');
-
-  const signingInput = `${header}.${payload}`;
-  const key = GOOGLE_PRIVATE_KEY;
-
-  console.log('[sheets] getAccessToken — email:', GOOGLE_SERVICE_ACCOUNT_EMAIL);
-  console.log('[sheets] getAccessToken — key inicia com:', key?.slice(0, 40));
-
-  const sign = crypto.createSign('RSA-SHA256');
-  sign.update(signingInput);
-  const signature = sign.sign(key, 'base64url');
-  const jwt = `${signingInput}.${signature}`;
-
-  const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
-  });
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`OAuth token error ${resp.status}: ${txt}`);
-  }
-  const data = await resp.json();
-  console.log('[sheets] OAuth OK — token obtido, expires_in:', data.expires_in);
-  _tokenCache  = data.access_token;
-  _tokenExpiry = agora + (data.expires_in - 300) * 1000;
-  return _tokenCache;
-}
-
-// ── Helpers REST ─────────────────────────────────────────────────────────────────────────────────────────────
-const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`;
-
-console.log('[sheets] BASE URL:', BASE);
-
-async function sheetsGET(path) {
-  const token = await getAccessToken();
-  const r = await fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`GET ${path} => ${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
-async function sheetsPOST(path, body) {
-  const token = await getAccessToken();
-  const url = path === ':batchUpdate' ? `${BASE}:batchUpdate` : `${BASE}${path}`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`POST ${path} => ${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
-async function sheetsPUT(path, body) {
-  const token = await getAccessToken();
-  const r = await fetch(`${BASE}${path}`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`PUT ${path} => ${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
-async function sheetsDELETE(path, body) {
-  const token = await getAccessToken();
-  const url = `${BASE}:batchUpdate`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`batchUpdate => ${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
-// ── Estrutura da planilha ──────────────────────────────────────────────────────────────────────────────────────────────
-const HDR_SALDO    = ['Cliente','Produto','Quantidade','Total','UltimaCompra'];
-// Adicionada coluna Metodo (Pix / Dinheiro / '') para rastrear forma de pagamento
-const HDR_HIST     = ['Data','Cliente','Tipo','Produto','Quantidade','Valor','Metodo'];
-
-async function getSheetsMeta() {
-  return comRetry(() => sheetsGET('?fields=sheets(properties(sheetId,title,index))'), 4, 'getSheetsMeta');
-}
-
-async function ensureSaldoSheet(meta) {
-  const aba0 = meta.sheets[0].properties;
-  if (aba0.title === 'Saldo') return aba0;
-  const jaExiste = meta.sheets.find(s => s.properties.title === 'Saldo');
-  if (jaExiste) return jaExiste.properties;
-  console.log(`[sheets] Renomeando aba "${aba0.title}" → "Saldo"`);
-  await comRetry(() => sheetsPOST(':batchUpdate', {
-    requests: [{ updateSheetProperties: {
-      properties: { sheetId: aba0.sheetId, title: 'Saldo' },
-      fields: 'title',
-    }}],
-  }), 4, 'renomearSaldo');
-  return { ...aba0, title: 'Saldo' };
-}
-
-async function ensureHeaders(sheetTitle, headers, sheetId) {
-  const range = `${sheetTitle}!A1:${String.fromCharCode(64 + headers.length)}1`;
-  const data  = await comRetry(() => sheetsGET(`/values/${encodeURIComponent(range)}`), 4, 'ensureHeaders');
-  const first = (data.values || [[]])[0] || [];
-  if (first.length === headers.length) return;
-  await comRetry(() => sheetsPUT(`/values/${encodeURIComponent(range)}?valueInputOption=RAW`, {
-    range, majorDimension: 'ROWS', values: [headers],
-  }), 4, 'setHeaders');
-}
-
-async function getOrCreateHistSheet(meta) {
-  const exists = meta.sheets.find(s => s.properties.title === 'Historico');
-  if (exists) return exists.properties;
-  const resp = await comRetry(() => sheetsPOST(':batchUpdate', {
-    requests: [{ addSheet: { properties: { title: 'Historico' } } }],
-  }), 4, 'addSheet');
-  const props = resp.replies[0].addSheet.properties;
-  await ensureHeaders('Historico', HDR_HIST, props.sheetId);
-  return props;
-}
-
-async function getRows(sheetTitle, headers) {
-  const lastCol = String.fromCharCode(64 + headers.length);
-  const data = await comRetry(
-    () => sheetsGET(`/values/${encodeURIComponent(sheetTitle + '!A2:' + lastCol)}?majorDimension=ROWS`),
-    4, 'getRows'
-  );
-  return (data.values || []).map((row, i) => {
-    const obj = {};
-    headers.forEach((h, j) => obj[h] = row[j] || '');
-    obj._rowIndex = i + 2;
-    return obj;
-  });
-}
-
-async function appendRow(sheetTitle, headers, values) {
-  const range = `${sheetTitle}!A:A`;
-  await comRetry(() => sheetsPOST(`/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
-    majorDimension: 'ROWS',
-    values: [headers.map(h => values[h] !== undefined ? String(values[h]) : '')],
-  }), 4, 'appendRow');
-}
-
-async function updateRow(sheetTitle, headers, rowIndex, values) {
-  const lastCol = String.fromCharCode(64 + headers.length);
-  const range   = `${sheetTitle}!A${rowIndex}:${lastCol}${rowIndex}`;
-  await comRetry(() => sheetsPUT(`/values/${encodeURIComponent(range)}?valueInputOption=RAW`, {
-    range, majorDimension: 'ROWS',
-    values: [headers.map(h => values[h] !== undefined ? String(values[h]) : '')],
-  }), 4, 'updateRow');
-}
-
-async function deleteRows(sheetId, rowIndexes) {
-  const sorted = [...new Set(rowIndexes)].sort((a, b) => b - a);
-  for (const ri of sorted) {
-    await comRetry(() => sheetsDELETE(':batchUpdate', {
-      requests: [{ deleteDimension: {
-        range: { sheetId, dimension: 'ROWS', startIndex: ri - 1, endIndex: ri },
-      } }],
-    }), 4, 'deleteRow');
-  }
-}
-
+// ── Registrar compra fiado ────────────────────────────────────────────────────
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
-    const meta     = await getSheetsMeta();
+    const meta      = await getSheetsMeta();
     const saldoProp = await ensureSaldoSheet(meta);
     await ensureHeaders('Saldo', HDR_SALDO, saldoProp.sheetId);
-    const histProp = await getOrCreateHistSheet(meta);
+    const histProp  = await getOrCreateHistSheet(meta);
     await ensureHeaders('Historico', HDR_HIST, histProp.sheetId);
 
     const rows       = await getRows('Saldo', HDR_SALDO);
@@ -230,7 +54,7 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
 }
 
-// ── Venda à vista: grava Compra + Pagamento no Histórico, sem tocar no Saldo ────────────
+// ── Venda à vista ───────────────────────────────────────────────────────────
 async function registrarVendaVista(clienteEnviado, produto, quantidade, metodo) {
   try {
     const meta     = await getSheetsMeta();
@@ -244,19 +68,14 @@ async function registrarVendaVista(clienteEnviado, produto, quantidade, metodo) 
     const dataAgora = agora();
     const metodoStr = metodo || '';
 
-    await appendRow('Historico', HDR_HIST, {
-      Data: dataAgora, Cliente: cliente, Tipo: 'Compra',
-      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2), Metodo: '',
-    });
-    await appendRow('Historico', HDR_HIST, {
-      Data: dataAgora, Cliente: cliente, Tipo: 'Pagamento',
-      Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2), Metodo: metodoStr,
-    });
+    await appendRow('Historico', HDR_HIST, { Data: dataAgora, Cliente: cliente, Tipo: 'Compra',    Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2), Metodo: '' });
+    await appendRow('Historico', HDR_HIST, { Data: dataAgora, Cliente: cliente, Tipo: 'Pagamento', Produto: produto, Quantidade: quantidade, Valor: valor.toFixed(2), Metodo: metodoStr });
 
     return { cliente, valor, metodo: metodoStr };
   } catch (err) { console.error('Erro venda à vista:', err.message); return null; }
 }
 
+// ── Cancelar último lançamento ───────────────────────────────────────────────
 async function cancelarLancamento(jid, nomeDigitado) {
   try {
     const hist = ULTIMOS_LANCAMENTOS[jid] || [];
@@ -320,12 +139,13 @@ async function cancelarLancamento(jid, nomeDigitado) {
   } catch (err) { console.error('Erro cancelar:', err.message); return '❌ Erro ao cancelar lançamento.'; }
 }
 
+// ── Pagamento por produto ──────────────────────────────────────────────────
 async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid, metodo) {
   try {
-    const meta    = await getSheetsMeta();
+    const meta      = await getSheetsMeta();
     const saldoProp = await ensureSaldoSheet(meta);
-    const saldoId = saldoProp.sheetId;
-    const histProp = await getOrCreateHistSheet(meta);
+    const saldoId   = saldoProp.sheetId;
+    await getOrCreateHistSheet(meta);
     const rows    = await getRows('Saldo', HDR_SALDO);
     const row     = rows.find(r => mesmoNome(r.Cliente, clienteEnviado) && norm(r.Produto) === norm(produto));
     if (!row) return { ok: false, msg: `❌ Nenhuma dívida de *${capitalizarNome(clienteEnviado)}* com ${nomeProdutoExib(produto)} encontrada.` };
@@ -348,17 +168,16 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
   } catch (err) { console.error('Erro pag produto:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
-// ── FIX: usa nomeCanon consistentemente em todo o fluxo de pagamento por valor ───────────
+// ── Pagamento por valor ───────────────────────────────────────────────────
 async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
   try {
-    const meta    = await getSheetsMeta();
+    const meta      = await getSheetsMeta();
     const saldoProp = await ensureSaldoSheet(meta);
-    const saldoId = saldoProp.sheetId;
+    const saldoId   = saldoProp.sheetId;
     await getOrCreateHistSheet(meta);
     const rows    = await getRows('Saldo', HDR_SALDO);
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon   = resolverNome(clienteEnviado, nomesConhecidos);
-    const nomeEfetivo = nomeCanon || capitalizarNome(clienteEnviado);
     const rowsCliente = nomeCanon
       ? rows.filter(r => r.Cliente === nomeCanon)
       : rows.filter(r => mesmoNome(r.Cliente, clienteEnviado));
@@ -392,10 +211,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
   } catch (err) { console.error('Erro pag valor:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
-// ── Módulo de relatórios (extraído para sheetsReports.js) ─────────────────────────────────
-const { createSheetsReports } = require('./sheetsReports');
-const _reports = createSheetsReports({ getRows, HDR_SALDO, HDR_HIST });
-
+// ── Verificar lembretes ───────────────────────────────────────────────────
 async function verificarLembretes(sock, jid) {
   const { DIAS_LEMBRETE } = require('./config');
   try {
@@ -422,11 +238,12 @@ async function verificarLembretes(sock, jid) {
   } catch (e) { console.error('Erro lembrete:', e.message); }
 }
 
+// ── Zerar cliente ────────────────────────────────────────────────────────────
 async function zerarCliente(nomeDigitado) {
   try {
-    const meta    = await getSheetsMeta();
+    const meta      = await getSheetsMeta();
     const saldoProp = await ensureSaldoSheet(meta);
-    const saldoId = saldoProp.sheetId;
+    const saldoId   = saldoProp.sheetId;
     await getOrCreateHistSheet(meta);
     const rows    = await getRows('Saldo', HDR_SALDO);
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
@@ -440,6 +257,10 @@ async function zerarCliente(nomeDigitado) {
     return `✅ Dívida de *${nomeCanon}* zerada! (R$ ${totalZerado.toFixed(2)} removido)`;
   } catch (err) { console.error('Erro zerar:', err.message); return '❌ Erro ao zerar cliente.'; }
 }
+
+// ── Relatórios (delegados para sheetsReports.js) ─────────────────────────────
+const { createSheetsReports } = require('./sheetsReports');
+const _reports = createSheetsReports({ getRows, HDR_SALDO, HDR_HIST });
 
 module.exports = {
   getDoc: async () => ({}), getSheetSaldo: async () => ({}), getSheetHistorico: async () => ({}),
