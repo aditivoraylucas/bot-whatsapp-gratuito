@@ -62,12 +62,10 @@ function dedupNomeInicio(texto) {
   const n = palavras.length;
   if (n < 2) return texto;
 
-  // Tenta tamanhos de bloco decrescentes (2 palavras, depois 1)
   for (let bloco = Math.floor(n / 2); bloco >= 1; bloco--) {
     const parte1 = palavras.slice(0, bloco).map(norm).join(' ');
     const parte2 = palavras.slice(bloco, bloco * 2).map(norm).join(' ');
     if (parte1 === parte2) {
-      // Remove o bloco duplicado
       return palavras.slice(bloco).join(' ');
     }
   }
@@ -85,8 +83,6 @@ async function transcreverAudio(audioBuffer, mimeType) {
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
     form.append('response_format', 'json');
-    // Prompt guia o Whisper a reconhecer nomes próprios brasileiros corretamente
-    // e não inventar frases quando não entende uma palavra
     const promptWhisper = [
       'Contexto: sistema de vendas de doces. Formato das mensagens: nome de cliente seguido de quantidade e produto.',
       'Nomes próprios brasileiros comuns: Ana, Carlos, Julia, Maria, Pedro, Lucas, Rodrigo, Raissa, Fernanda, Gabriel, Beatriz, Rafaela.',
@@ -178,44 +174,18 @@ function extrairMetodo(texto) {
   return '';
 }
 
-/**
- * Detecta frases do tipo:
- *   "Lucas 2 trufas pago pix"
- *   "Lucas uma trufa e um bombom pago no pix"
- *   "Lucas uma trufa e um bombom pagou no pix"
- *   "Lucas pegou 1 bombom e pagou no dinheiro"
- *   "Lucas comprou 2 trufas e pagou dinheiro"
- *
- * Regra: há produto na frase + há indicação de quitação (KW_VISTA ou pagou/paga).
- * Retorna { nome, itens, metodo } com itens agrupados por produto, ou null.
- */
 function parsearVendaVista(linha) {
   const tNorm = norm(linha);
-
-  // Verifica se há pelo menos um produto reconhecível na frase
   const temProduto = tNorm.split(/\s+/).some(p => !!toProduto(p));
-
-  // Verifica se há indicação de quitação imediata:
-  // KW_VISTA (pago, pix, dinheiro...) OU verbos pagou/paga quando há produto
   const temKwVista = [...KW_VISTA].some(kw => new RegExp(`\\b${kw}\\b`).test(tNorm));
   const temPagouComProduto = /\b(pagou|paga)\b/.test(tNorm) && temProduto;
-
   if (!temKwVista && !temPagouComProduto) return null;
-
-  // Pagamento de dívida puro: "Lucas pagou 10" ou "Lucas pagou 2 trufas" (sem KW_VISTA)
-  // Se "pagou" está presente MAS não há KW_VISTA, só aceita como à vista se tiver produto
   if (!temKwVista && temPagouComProduto) {
     const possPagDivida = /\b(pagou|paga)\b.*\b\d+([,.]\d+)?\b/.test(tNorm) && !temProduto;
     if (possPagDivida) return null;
   }
-
-  // Verbos de ação de compra que devem ser removidos da frase antes de parsear
   const KW_VERBOS_COMPRA = /\b(pegou|comprou|levou|tomou|quer|quero|queria)\b/g;
-
-  // Extrai o método antes de limpar a linha
   const metodo = extrairMetodo(linha);
-
-  // Limpa: remove KW_VISTA, pagou/paga, verbos de compra e preposições soltas
   let linhaLimpa = tNorm;
   for (const kw of KW_VISTA) {
     linhaLimpa = linhaLimpa.replace(new RegExp(`\\b${kw}\\b`, 'g'), ' ');
@@ -226,17 +196,13 @@ function parsearVendaVista(linha) {
     .replace(/\b(no|na|em|pelo|pela)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-
   const resultado = parsearLinha(linhaLimpa);
   if (!resultado) return null;
-
-  // Agrupa itens com o mesmo produto (evita duplicatas por sinônimos)
   const mapa = new Map();
   for (const item of resultado.itens) {
     mapa.set(item.produto, (mapa.get(item.produto) || 0) + item.quantidade);
   }
   const itensAgrupados = [...mapa.entries()].map(([produto, quantidade]) => ({ produto, quantidade }));
-
   return { ...resultado, itens: itensAgrupados, metodo };
 }
 
@@ -253,9 +219,7 @@ function parsearPagamento(linha) {
   if (kwIdx <= 0) return null;
   const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
   if (!nomeRaw) return null;
-
   const metodo = extrairMetodo(linha);
-
   const resto = palavrasNorm.slice(kwIdx + 1).join(' ').trim();
   if (resto) {
     const partesResto = resto.split(/\s+/).filter(Boolean);
@@ -316,7 +280,15 @@ function mensagemAjuda() {
     '*Registrar compra (fiado):*','  `julia 2 trufas`','  `carlos 1 bolo 3 trufas`','',
     '*Venda à vista (pago na hora):*','  `julia 2 trufas pago`','  `carlos 1 bolo pago pix`','  `ana 3 trufas pago dinheiro`','  `ana pegou 2 trufas e pagou pix`','',
     '*Registrar pagamento de dívida:*','  `julia pagou 10`','  `carlos pix 15`','  `ana pagou 2 trufas`','',
-    '*Relatórios:*','  `relatorio` — geral','  `relatorio detalhado`','  `relatorio quitados`','  `relatorio junho`','  `resumo` — resumo do dia','',
+    '*Relatórios:*',
+    '  `relatorio` — geral (maior devedor primeiro)',
+    '  `relatorio nome` — ordenado A–Z',
+    '  `relatorio data` — ordenado por compra mais recente',
+    '  `relatorio valor` — ordenado por valor (explícito)',
+    '  `relatorio detalhado`',
+    '  `relatorio quitados`',
+    '  `relatorio junho`',
+    '  `resumo` — resumo do dia','',
     '*Consultas:*','  `saldo julia`','  `historico carlos`','',
     '*Aliases (apelidos):*',
     '  `alias ray Raylucas` — define "ray" como apelido de "Raylucas"',
@@ -333,11 +305,12 @@ function mensagemAjuda() {
   ].join('\n');
 }
 
-// ── Estado de confirmação pendente para zerar (sugestão 2) ───────────────────────────────────────
-// Armazena por jid: { cliente: string, expira: timestamp }
-// Se o usuário confirmar com "sim" dentro de 60s, o zerar é executado.
+// ── Estado de confirmação pendente para zerar ───────────────────────────────────────────────────
 const ZERAR_PENDENTE = {};
-const ZERAR_TTL_MS = 60_000; // 60 segundos para confirmar
+const ZERAR_TTL_MS = 60_000;
+
+// ── Ordens válidas para relatorio ──────────────────────────────────────────────────────────────
+const ORDENS_RELATORIO = new Set(['nome', 'data', 'valor']);
 
 // ── Processador principal de texto ───────────────────────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
@@ -346,24 +319,22 @@ async function processarTexto(texto, jid, sock) {
   const palavras = t.split(/\s+/).filter(Boolean);
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
-  // ── Sugestão 2: confirmação de zerar pendente ─────────────────────────────────────────────
-  // Se há uma confirmação pendente e o usuário digitou "sim", executa o zerar
+  // ── Confirmação de zerar pendente ──────────────────────────────────────────────────────────
   if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     const { cliente, expira } = ZERAR_PENDENTE[jid];
     delete ZERAR_PENDENTE[jid];
     if (Date.now() > expira) return `⏱️ Tempo expirado. Digite novamente _zerar ${cliente}_ para tentar de novo.`;
     return await zerarCliente(cliente);
   }
-  // Se havia pendente mas digitou qualquer outra coisa, cancela silenciosamente
   if (ZERAR_PENDENTE[jid] && p0 !== 'sim' && p0 !== 's') {
     delete ZERAR_PENDENTE[jid];
-    // Não retorna aqui — continua processando o comando normalmente
   }
 
   if (p0 === 'relatorio' || p0 === 'relatorios') {
     if (p1 === 'detalhado')                    return await gerarRelatorioDetalhado();
     if (p1 === 'quitados' || p1 === 'quitado') return await gerarRelatorioQuitados();
     if (p1 && isMes(p1))                       return await gerarRelatorioMes(p1);
+    if (p1 && ORDENS_RELATORIO.has(p1))        return await gerarRelatorioGeral(p1);
     return await gerarRelatorioGeral();
   }
   if (p0 === 'resumo')               return await gerarResumoDiario();
@@ -373,30 +344,25 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'ajuda' || p0 === 'help') return mensagemAjuda();
   if (p0 === 'produtos')             return listarProdutos();
 
-  // ── Sugestão 2: zerar com confirmação ────────────────────────────────────────────────────
+  // ── Zerar com confirmação ──────────────────────────────────────────────────────────────────
   if (p0 === 'zerar' && p1) {
     const nomeCliente = palavras.slice(1).join(' ');
     ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
-    // Limpa automaticamente após TTL para não poluir memória
     setTimeout(() => { if (ZERAR_PENDENTE[jid]?.cliente === nomeCliente) delete ZERAR_PENDENTE[jid]; }, ZERAR_TTL_MS + 1000);
     return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
   }
 
-  // ── Sugestão 1: gerenciar aliases ────────────────────────────────────────────────────────
-  // "alias" — lista todos
+  // ── Gerenciar aliases ──────────────────────────────────────────────────────────────────────
   if (p0 === 'aliases') {
     const entradas = Object.entries(ALIASES);
     if (!entradas.length) return '📋 Nenhum apelido cadastrado ainda.\n_Use: alias [apelido] [nome completo]_';
     const linhas = entradas.map(([ap, nome]) => `  _${ap}_ → *${nome}*`).join('\n');
     return `📋 *Apelidos cadastrados:*\n${linhas}`;
   }
-  // "alias ray" (sem nome) — remove
-  // "alias ray Raylucas" — cadastra
   if (p0 === 'alias') {
     if (!p1) return '❌ Uso: _alias [apelido] [nome completo]_\nExemplo: _alias ray Raylucas_';
     const nomeCompleto = palavras.slice(2).join(' ').trim();
     if (!nomeCompleto) {
-      // Remove o alias
       if (!ALIASES[norm(p1)]) return `⚠️ Apelido _${p1}_ não existe.`;
       definirAlias(p1, null);
       return `🗑️ Apelido _${p1}_ removido.`;
@@ -422,19 +388,17 @@ async function processarTexto(texto, jid, sock) {
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
-  // ── Sugestão 1: expandir alias no texto antes de parsear ─────────────────────────────────
-  // Se a primeira palavra é um alias conhecido, substitui pelo nome completo
+  // ── Expandir alias no texto antes de parsear ──────────────────────────────────────────────
   let textoResolvido = texto;
   {
     const primeiraOriginal = texto.trim().split(/\s+/)[0];
     const aliasResolvido   = resolverAlias(primeiraOriginal);
     if (aliasResolvido) {
-      // Substitui SOMENTE a primeira palavra pelo nome completo
       textoResolvido = aliasResolvido + texto.trim().slice(primeiraOriginal.length);
     }
   }
 
-  // ── Venda à vista (pago na hora) — verificar ANTES do pagamento de dívida ──
+  // ── Venda à vista ─────────────────────────────────────────────────────────────────────────
   const vista = parsearVendaVista(textoResolvido);
   if (vista) {
     const msgs = [];
