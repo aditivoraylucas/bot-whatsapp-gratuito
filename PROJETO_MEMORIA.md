@@ -1,6 +1,42 @@
 # PROJETO_MEMORIA.md
 > Arquivo de memória do projeto. Atualizar a cada sessão de trabalho.
-> **Como usar em nova sessão:** _"Leia o PROJETO_MEMORIA.md do repositório aditivoraylucas/bot-whatsapp-gratuito e continue o trabalho."_
+
+---
+
+## 🔄 Fluxo de Trabalho com a IA
+
+> **Copie e salve esses dois comandos. Use sempre.**
+
+### ▶️ Início de sessão
+```
+Leia o PROJETO_MEMORIA.md do repositório aditivoraylucas/bot-whatsapp-gratuito e continue o trabalho.
+```
+A IA vai ler o arquivo, carregar todo o contexto e já saber exatamente onde parou.
+
+### ⏹️ Fim de sessão (ou a qualquer grande avanço)
+```
+Atualize a memória
+```
+A IA vai:
+1. Ler os arquivos atuais do GitHub (`PROJETO_MEMORIA.md` + `DECISOES.md`)
+2. Incorporar tudo que foi feito na sessão
+3. Fazer commit com os dois arquivos atualizados
+4. Confirmar o que mudou
+
+### 🗓️ Ciclo completo
+```
+[INÍCIO]  "Leia o PROJETO_MEMORIA.md e continue o trabalho"
+              ↓
+         trabalho, commits, decisões...
+              ↓
+[FIM]    "Atualize a memória"
+              ↓
+         PROJETO_MEMORIA.md + DECISOES.md atualizados no GitHub
+              ↓
+         próxima sessão começa do ponto exato
+```
+
+> ⚠️ **A IA não atualiza automaticamente sem você pedir.** “Atualize a memória” é o gatilho manual intencional.
 
 ---
 
@@ -64,18 +100,19 @@ WhatsApp ←→ Baileys (src/bot.js)
 
 ```
 /
-├── index.js                    ← Entry point (importa src/bot.js)
+├── index.js                     ← Entry point (importa src/bot.js)
 ├── src/
-│   ├── bot.js                  ← Conexão Baileys, reconexão, listener de mensagens
-│   ├── handlers.js             ← processarTexto(), parsers, comandos
-│   ├── sheets.js               ← registrarOuAcumular(), cancelar, relatórios
-│   ├── utils.js                ← norm(), PRECOS, ALIASES, pushLancamento, etc.
-│   └── config.js               ← Variáveis de ambiente centralizadas
-├── CONTEXTO_BOT.md             ← Arquivo de memória antigo (substituído por este)
-├── PROJETO_MEMORIA.md          ← Este arquivo (memória principal)
+│   ├── bot.js                   ← Conexão Baileys, reconexão, listener de mensagens
+│   ├── handlers.js              ← processarTexto(), parsers, comandos
+│   ├── sheets.js                ← registrarOuAcumular(), cancelar, relatórios
+│   ├── utils.js                 ← norm(), PRECOS, ALIASES, pushLancamento, etc.
+│   └── config.js                ← Variáveis de ambiente centralizadas
+├── PROJETO_MEMORIA.md           ← Este arquivo (memória principal)
+├── DECISOES.md                  ← Registro de decisões arquiteturais
+├── CONTEXTO_BOT.md              ← Arquivo de memória antigo (substituído)
 ├── Codigo_Google_Apps_Script.gs ← Script da planilha Google
 ├── package.json
-├── Procfile                    ← web: node index.js
+├── Procfile                     ← web: node index.js
 └── render-build.sh
 ```
 
@@ -114,89 +151,53 @@ WhatsApp ←→ Baileys (src/bot.js)
 
 ### Infraestrutura
 - Reconexão automática com backoff exponencial
-- Deduplicação de mensagens (Set com TTL de 30s) — evita duplo processamento
-- Limite de crédito por cliente (bloqueia nova compra se ultrapassar)
+- Deduplicação de mensagens (Set com TTL de 30s)
+- Limite de crédito por cliente
 - Fuzzy matching de nomes (Levenshtein)
 - Aliases de nomes persistidos em `aliases.json`
 - Confirmação antes de zerar cliente (TTL 60s)
 
 ---
 
-## 🔴 Bugs Pendentes (identificados, ainda não corrigidos)
+## 🔴 Bugs Pendentes
 
-### Bug 7 — `getSheetHistorico()` faz dupla chamada `getDoc()` em cascata
+### Bug 7 — Dupla chamada `getDoc()` por operação
 - **Arquivo:** `src/sheets.js`
-- **Problema:** `registrarOuAcumular()` chama `getSheetSaldo()` + `getSheetHistorico()` separadamente, cada uma chamando `getDoc()` → 2 chamadas à API Google por operação. Com volume moderado causa erro **429 Too Many Requests**.
-- **Fix planejado:** Refatorar para chamar `getDoc()` uma única vez e passar a instância para ambas.
+- **Problema:** `registrarOuAcumular()` chama `getSheetSaldo()` + `getSheetHistorico()` separadamente → 2 chamadas à API Google por operação → erro **429** com volume moderado.
+- **Fix planejado:** Chamar `getDoc()` uma única vez e passar a instância para ambas.
 
-### Bug 8 — `onEdit` no Apps Script sem proteção de sheet
+### Bug 8 — `onEdit` sem proteção de aba
 - **Arquivo:** `Codigo_Google_Apps_Script.gs`
-- **Problema:** O trigger `onEdit` não verifica `e.range.getSheet().getName()` — dispara para qualquer edição em qualquer aba. Edição manual pode corromper saldos.
-- **Fix planejado:** Adicionar no início de `onEdit`: `if (e.range.getSheet().getName() !== 'Controle') return;`
+- **Fix planejado:** Adicionar `if (e.range.getSheet().getName() !== 'Controle') return;`
 
-### Bug 9 — Sem hot-reload (toda atualização derruba sessão)
-- **Problema:** O Render recria o container a cada deploy, perdendo sessão em memória e forçando novo pairing code.
-- **Fix planejado:** Avaliar persistência de sessão em volume externo ou estratégia zero-downtime.
+### Bug 9 — Sem hot-reload (sessão perdida a cada deploy)
+- **Fix planejado:** Avaliar persistência de sessão em volume externo.
 
 ---
 
-## 🚧 Melhorias Pendentes (priorizadas)
+## 🚧 Melhorias Pendentes
 
-### Alta prioridade
-| # | Melhoria | Status |
-|---|----------|--------|
-| 4 | Múltiplos clientes numa mensagem (`Ana 2 trufas, Carlos 1 bolo`) | Planejada — implementar em `handlers.js` com `parsearLote()` |
-| 6 | `cancelar carlos` mostra últimos 3 lançamentos para escolher | Planejada — requer `CANCELAR_PENDENTE` + confirmação `cancelar 1/2/3` |
-
-### Não implementar no bot (solução externa)
-| # | Melhoria | Motivo |
-|---|----------|--------|
-| 10 | Backup mensal da planilha | Usar Google Apps Script com gatilho mensal — ver seção abaixo |
+| # | Melhoria | Plano |
+|---|----------|-------|
+| 4 | Múltiplos clientes por mensagem (`Ana 2 trufas, Carlos 1 bolo`) | `parsearLote()` em `handlers.js` — divide por `,` `;` `\n`, ativa se ≥ 2 segmentos válidos |
+| 6 | `cancelar carlos` exibe últimos 3 lançamentos para escolher | `CANCELAR_PENDENTE` em `handlers.js` + confirmação `cancelar 1/2/3` |
+| 10 | Backup mensal da planilha | **Não é no bot** — usar Google Apps Script (ver abaixo) |
 
 ---
 
-## 📋 Detalhes das Melhorias Planejadas
-
-### Sugestão 4 — Múltiplos clientes por mensagem
-**Onde implementar:** `src/handlers.js`
-**O que adicionar:**
-1. Nova função `parsearLote(texto)` — divide por `,` `;` `\n`, tenta parsear cada segmento
-2. Só ativa se ≥ 2 segmentos válidos (senão cai no fluxo normal)
-3. Cada segmento passa por `parsearVendaVista` → `parsearPagamento` → `parsearLinha`
-4. No `processarTexto`, chamar `parsearLote` antes do bloco `parsearVendaVista`
-
-### Sugestão 6 — Cancelar com seleção (opção C — sem ambiguidade)
-**Onde implementar:** `src/handlers.js` + `src/sheets.js`
-**Fluxo:**
-1. `cancelar carlos` → lista até 3 últimos lançamentos numerados
-2. Usuário responde `cancelar 1`, `cancelar 2` ou `cancelar 3`
-3. Bot executa o cancelamento do item escolhido
-**O que adicionar:**
-- `CANCELAR_PENDENTE` em `handlers.js` (mesmo padrão do `ZERAR_PENDENTE`)
-- `cancelarLancamento` em `sheets.js` aceita índice opcional além do nome
-- Reconhecer `cancelar N` como confirmação quando há pendente para o `jid`
-
----
-
-## 🗓️ Backup Automático da Planilha (Apps Script)
-
-Não implementar no bot. Usar este script diretamente na planilha:
+## 🗓️ Backup Automático da Planilha
 
 ```javascript
 function backupMensal() {
   const ss        = SpreadsheetApp.getActiveSpreadsheet();
-  const abaOrigem = ss.getSheetByName('Histórico'); // ajustar nome da aba
+  const abaOrigem = ss.getSheetByName('Histórico');
   if (!abaOrigem) return;
-
   const mes  = Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'yyyy-MM');
   const nome = `Histórico ${mes}`;
-
-  if (ss.getSheetByName(nome)) return; // já existe, não duplica
-
+  if (ss.getSheetByName(nome)) return;
   abaOrigem.copyTo(ss).setName(nome);
 }
 ```
-
 **Gatilho:** Extensões → Apps Script → Gatilhos → `backupMensal` → Mensal → dia 1 → 00h–01h
 
 ---
@@ -204,27 +205,27 @@ function backupMensal() {
 ## 📅 Histórico de Sessões
 
 ### Sessão 24/06/2026
-- Analisado e planejado: sugestão 4 (múltiplos clientes), sugestão 6 (cancelar robusto), sugestão 10 (backup planilha)
-- Criado `PROJETO_MEMORIA.md` (este arquivo)
-- Nenhum código alterado nesta sessão além deste documento
+- Planejadas sugestões 4, 6 e 10
+- Criados `PROJETO_MEMORIA.md`, `DECISOES.md`
+- Adicionado fluxo de sessão ("Atualize a memória")
 
 ### Sessão 22/06/2026
-- Corrigidos bugs 1–6 (ver `CONTEXTO_BOT.md` para detalhes)
-- Implementadas: deduplicação de mensagens, aliases, confirmação de zerar, transcrição Groq
-- Removido agendamento automático de relatório de devedores (revertido em `428150e`)
+- Corrigidos bugs 1–6
+- Implementadas: deduplicação, aliases, confirmação de zerar, transcrição Groq
+- Revertido agendamento automático de devedores (`428150e`)
 
 ### Sessão 20/06/2026
-- Correções iniciais de reconexão, JWT, retry Google Sheets
+- Correções de reconexão, JWT, retry Google Sheets
 - Substituição de QR Code por Pairing Code
 
 ---
 
 ## ⚠️ Regras Importantes
 
-1. **Nunca alterar a estrutura da planilha Google** sem confirmar nomes de abas com o dono do projeto.
+1. **Nunca alterar a estrutura da planilha Google** sem confirmar nomes de abas.
 2. **Nunca remover o retry/backoff** nas chamadas ao Google Sheets (Bug 7 ainda existe).
-3. **`parsearVendaVista` tem prioridade** sobre `parsearPagamento` no fluxo do `processarTexto` — não inverter essa ordem.
-4. **`ZERAR_PENDENTE` e futuros `*_PENDENTE`** devem sempre ter TTL + `setTimeout` para limpeza automática.
-5. **`localStorage`/`sessionStorage` não funcionam** no Render — usar apenas variáveis em memória ou arquivos JSON.
-6. **Ao criar novo produto** via `novo`, a chave interna usa `norm().replace(/\s+/g, '_')` — não mudar esse padrão.
-7. **Não usar `bot_whatsapp_puro.py`** — é versão legada, mantida só como referência.
+3. **`parsearVendaVista` tem prioridade** sobre `parsearPagamento` — não inverter essa ordem.
+4. **`*_PENDENTE`** devem sempre ter TTL + `setTimeout` para limpeza automática.
+5. **`localStorage`/`sessionStorage` não funcionam** no Render — usar variáveis em memória ou JSON.
+6. **Chave interna de produto** usa `norm().replace(/\s+/g, '_')` — não mudar esse padrão.
+7. **Não usar `bot_whatsapp_puro.py`** — versão legada.
