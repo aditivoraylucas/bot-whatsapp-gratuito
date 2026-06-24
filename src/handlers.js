@@ -47,6 +47,32 @@ function corrigirTranscricao(texto) {
   return texto.split(/\s+/).map(p => corrigirPalavra(p)).join(' ');
 }
 
+/**
+ * Remove palavras duplicadas CONSECUTIVAS no início da frase.
+ * Exemplos:
+ *   "Rodrigo Rodrigo um bolo"  →  "Rodrigo um bolo"
+ *   "Ana Maria Ana Maria 2 trufas"  →  "Ana Maria 2 trufas"
+ *   "Carlos Carlos pagou 10"  →  "Carlos pagou 10"
+ * Não afeta: "Ana e Maria" (palavras diferentes), meio da frase, etc.
+ */
+function dedupNomeInicio(texto) {
+  if (!texto) return texto;
+  const palavras = texto.trim().split(/\s+/);
+  const n = palavras.length;
+  if (n < 2) return texto;
+
+  // Tenta tamanhos de bloco decrescentes (2 palavras, depois 1)
+  for (let bloco = Math.floor(n / 2); bloco >= 1; bloco--) {
+    const parte1 = palavras.slice(0, bloco).map(norm).join(' ');
+    const parte2 = palavras.slice(bloco, bloco * 2).map(norm).join(' ');
+    if (parte1 === parte2) {
+      // Remove o bloco duplicado
+      return palavras.slice(bloco).join(' ');
+    }
+  }
+  return texto;
+}
+
 // ── Transcrição de áudio via Groq Whisper ─────────────────────────────────────────────
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
@@ -58,13 +84,17 @@ async function transcreverAudio(audioBuffer, mimeType) {
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
     form.append('response_format', 'json');
+    // Prompt guia o Whisper a reconhecer nomes próprios brasileiros corretamente
+    // e não inventar frases quando não entende uma palavra
     const promptWhisper = [
-      'Comandos de venda: nomes de clientes seguidos de quantidade e produto.',
+      'Contexto: sistema de vendas de doces. Formato das mensagens: nome de cliente seguido de quantidade e produto.',
+      'Nomes próprios brasileiros comuns: Ana, Carlos, Julia, Maria, Pedro, Lucas, Rodrigo, Raissa, Fernanda, Gabriel, Beatriz, Rafaela.',
       'Produtos: trufa, trufas, bolo, bolos, bombom, bombons.',
-      'Exemplos: "julia 1 bolo", "ana 3 trufas", "carlos 2 bolos", "maria pagou 10",',
-      '"pedro pix 15", "joao pagou 2 trufas", "relatorio", "resumo", "cancelar julia".',
-      '"calor 2 trufas pago pix", "raylucas 1 bombom pago dinheiro" (venda à vista).',
-      'Os nomes são nomes próprios brasileiros. Os números são quantidades pequenas (1 a 20).',
+      'Exemplos exatos de entradas válidas:',
+      '"Rodrigo 1 bolo", "Ana 3 trufas", "Carlos 2 bolos", "Julia 1 bombom",',
+      '"Maria pagou 10", "Pedro pix 15", "Joao pagou 2 trufas",',
+      '"Raissa 1 bolo", "Rodrigo 2 trufas pago pix", "Ana pegou 1 bolo e pagou dinheiro".',
+      'IMPORTANTE: se não entender uma palavra, transcreva o som mais próximo. Não invente frases como "o que é" ou "não sei".',
     ].join(' ');
     form.append('prompt', promptWhisper);
     const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
@@ -151,11 +181,11 @@ function extrairMetodo(texto) {
  * Detecta frases do tipo:
  *   "Lucas 2 trufas pago pix"
  *   "Lucas uma trufa e um bombom pago no pix"
- *   "Lucas uma trufa e um bombom pagou no pix"   ← NOVO
- *   "Lucas pegou 1 bombom e pagou no dinheiro"   ← NOVO
- *   "Lucas comprou 2 trufas e pagou dinheiro"     ← NOVO
+ *   "Lucas uma trufa e um bombom pagou no pix"
+ *   "Lucas pegou 1 bombom e pagou no dinheiro"
+ *   "Lucas comprou 2 trufas e pagou dinheiro"
  *
- * Regra: há produto na frase + há indicação de quitação (KW_VISTA ou pagou/pagou).
+ * Regra: há produto na frase + há indicação de quitação (KW_VISTA ou pagou/paga).
  * Retorna { nome, itens, metodo } com itens agrupados por produto, ou null.
  */
 function parsearVendaVista(linha) {
@@ -165,7 +195,7 @@ function parsearVendaVista(linha) {
   const temProduto = tNorm.split(/\s+/).some(p => !!toProduto(p));
 
   // Verifica se há indicação de quitação imediata:
-  // KW_VISTA (pago, pix, dinheiro...) OU verbos pagou/pagou quando há produto
+  // KW_VISTA (pago, pix, dinheiro...) OU verbos pagou/paga quando há produto
   const temKwVista = [...KW_VISTA].some(kw => new RegExp(`\\b${kw}\\b`).test(tNorm));
   const temPagouComProduto = /\b(pagou|paga)\b/.test(tNorm) && temProduto;
 
@@ -174,7 +204,6 @@ function parsearVendaVista(linha) {
   // Pagamento de dívida puro: "Lucas pagou 10" ou "Lucas pagou 2 trufas" (sem KW_VISTA)
   // Se "pagou" está presente MAS não há KW_VISTA, só aceita como à vista se tiver produto
   if (!temKwVista && temPagouComProduto) {
-    // Se vier valor numérico sem produto, é pagamento de dívida — deixa para parsearPagamento
     const possPagDivida = /\b(pagou|paga)\b.*\b\d+([,.]\d+)?\b/.test(tNorm) && !temProduto;
     if (possPagDivida) return null;
   }
@@ -224,7 +253,6 @@ function parsearPagamento(linha) {
   const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
   if (!nomeRaw) return null;
 
-  // Detecta método a partir da keyword principal e do restante da linha
   const metodo = extrairMetodo(linha);
 
   const resto = palavrasNorm.slice(kwIdx + 1).join(' ').trim();
@@ -377,6 +405,6 @@ async function processarTexto(texto, jid, sock) {
 }
 
 module.exports = {
-  transcreverAudio, limparTranscricao, corrigirTranscricao,
+  transcreverAudio, limparTranscricao, corrigirTranscricao, dedupNomeInicio,
   processarTexto, mensagemAjuda,
 };
