@@ -1,4 +1,4 @@
-// ─── Módulo de relatórios extraído de sheets.js ───────────────────────────────────────────────
+// ─── Módulo de relatórios extraído de sheets.js ───────────────────────────────────
 // Responsabilidade: leitura e formatação de relatórios. Não grava nada no Sheets.
 // Dependências injetadas via createSheetsReports({ getRows, HDR_SALDO, HDR_HIST })
 
@@ -11,9 +11,22 @@ const {
   nomeProdutoExib,
 } = require('./utils');
 
+// Ordenações suportadas: 'valor' (desc, padrão) | 'nome' (az) | 'data' (mais recente primeiro)
+function ordenarClientes(entries, ordem) {
+  switch (norm(ordem || 'valor')) {
+    case 'nome':  return [...entries].sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+    case 'data':  return [...entries].sort((a, b) => {
+      const parseData = str => { const p = (str || '').split('/'); return p.length >= 3 ? new Date(`${p[2]}-${p[1]}-${p[0]}`) : new Date(0); };
+      return parseData(b[1].ultimaCompra) - parseData(a[1].ultimaCompra);
+    });
+    default:      return [...entries].sort((a, b) => b[1].totalDevido - a[1].totalDevido);
+  }
+}
+
 function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
 
-  async function gerarRelatorioGeral() {
+  // ordem: 'valor' (padrão) | 'nome' | 'data'
+  async function gerarRelatorioGeral(ordem) {
     try {
       const rows = await getRows('Saldo', HDR_SALDO);
       if (!rows.length) return 'Nenhuma dívida em aberto no momento.';
@@ -24,13 +37,17 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
         const qtd   = parseInt(row.Quantidade || '0');
         const total = parseFloat(row.Total || '0');
         if (!nome || !prod) continue;
-        if (!clientes[nome]) clientes[nome] = { itens: [], totalDevido: 0 };
+        if (!clientes[nome]) clientes[nome] = { itens: [], totalDevido: 0, ultimaCompra: row.UltimaCompra || '' };
         clientes[nome].itens.push({ produto: prod, quantidade: qtd, total });
         clientes[nome].totalDevido += total;
+        // mantém a data mais recente
+        if (row.UltimaCompra > clientes[nome].ultimaCompra) clientes[nome].ultimaCompra = row.UltimaCompra;
       }
       if (!Object.keys(clientes).length) return 'Nenhuma dívida em aberto no momento.';
-      const ordenados = Object.entries(clientes).sort((a, b) => b[1].totalDevido - a[1].totalDevido);
-      let resposta = '*Relatório de Dívidas*\n───────────────\n'; let totalGeral = 0;
+      const ordenados = ordenarClientes(Object.entries(clientes), ordem);
+      const legendaOrdem = { nome: '🔤 A–Z', data: '📅 Data', valor: '💰 Valor' };
+      let resposta = `*Relatório de Dívidas* (${legendaOrdem[norm(ordem || 'valor')] || '💰 Valor'})\n───────────────\n`;
+      let totalGeral = 0;
       for (const [nome, dados] of ordenados) {
         resposta += `\n*${nome}*\n`;
         for (const item of dados.itens) resposta += `  ${nomeProdutoExib(item.produto)}: ${item.quantidade} unid. = R$ ${item.total.toFixed(2)}\n`;
@@ -42,7 +59,9 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
     } catch (err) { console.error('Erro relatorio:', err.message); return '❌ Erro ao gerar relatório.'; }
   }
 
-  async function carregarHistoricoAgrupado(filtroMes) {
+  // opts: string (filtroMes) OU { filtroMes, ordem } — retrocompatível
+  async function carregarHistoricoAgrupado(opts) {
+    const filtroMes = typeof opts === 'string' ? opts : (opts && opts.filtroMes) || null;
     const rowsSaldo = await getRows('Saldo', HDR_SALDO);
     const saldos = {};
     for (const row of rowsSaldo) {
