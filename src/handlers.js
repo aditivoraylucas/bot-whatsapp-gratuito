@@ -7,6 +7,7 @@ const {
   emojiProduto, nomeProdutoExib,
   PRECOS, SINONIMOS_EXTRA, salvarPrecos, salvarSinonimosExtra, todosOsSinonimos,
   pushLancamento,
+  resolverAlias, definirAlias, ALIASES,
 } = require('./utils');
 const {
   registrarOuAcumular, cancelarLancamento,
@@ -317,14 +318,26 @@ function mensagemAjuda() {
     '*Registrar pagamento de dívida:*','  `julia pagou 10`','  `carlos pix 15`','  `ana pagou 2 trufas`','',
     '*Relatórios:*','  `relatorio` — geral','  `relatorio detalhado`','  `relatorio quitados`','  `relatorio junho`','  `resumo` — resumo do dia','',
     '*Consultas:*','  `saldo julia`','  `historico carlos`','',
+    '*Aliases (apelidos):*',
+    '  `alias ray Raylucas` — define "ray" como apelido de "Raylucas"',
+    '  `alias ju Julia Souza` — define "ju" como apelido de "Julia Souza"',
+    '  `alias ray` — remove o apelido "ray"',
+    '  `aliases` — lista todos os apelidos cadastrados',
+    '',
     '*Outros:*',
     '  `cancelar julia` — desfaz último lançamento',
-    '  `zerar carlos` — zera dívida',
+    '  `zerar carlos` — zera dívida (pede confirmação)',
     '  `produtos` — lista produtos e preços',
     '  `preco trufa 6` — muda preço',
     '  `novo brigadeiro 3.50` — cadastra produto',
   ].join('\n');
 }
+
+// ── Estado de confirmação pendente para zerar (sugestão 2) ───────────────────────────────────────
+// Armazena por jid: { cliente: string, expira: timestamp }
+// Se o usuário confirmar com "sim" dentro de 60s, o zerar é executado.
+const ZERAR_PENDENTE = {};
+const ZERAR_TTL_MS = 60_000; // 60 segundos para confirmar
 
 // ── Processador principal de texto ───────────────────────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
@@ -332,6 +345,20 @@ async function processarTexto(texto, jid, sock) {
   const t        = norm(texto);
   const palavras = t.split(/\s+/).filter(Boolean);
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
+
+  // ── Sugestão 2: confirmação de zerar pendente ─────────────────────────────────────────────
+  // Se há uma confirmação pendente e o usuário digitou "sim", executa o zerar
+  if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
+    const { cliente, expira } = ZERAR_PENDENTE[jid];
+    delete ZERAR_PENDENTE[jid];
+    if (Date.now() > expira) return `⏱️ Tempo expirado. Digite novamente _zerar ${cliente}_ para tentar de novo.`;
+    return await zerarCliente(cliente);
+  }
+  // Se havia pendente mas digitou qualquer outra coisa, cancela silenciosamente
+  if (ZERAR_PENDENTE[jid] && p0 !== 'sim' && p0 !== 's') {
+    delete ZERAR_PENDENTE[jid];
+    // Não retorna aqui — continua processando o comando normalmente
+  }
 
   if (p0 === 'relatorio' || p0 === 'relatorios') {
     if (p1 === 'detalhado')                    return await gerarRelatorioDetalhado();
@@ -343,9 +370,40 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'saldo'     && p1)      return await gerarSaldoIndividual(resto);
   if (p0 === 'historico' && p1)      return await gerarHistoricoCliente(resto);
   if (p0 === 'cancelar'  && p1)      return await cancelarLancamento(jid, resto);
-  if (p0 === 'zerar'     && p1)      return await zerarCliente(resto);
   if (p0 === 'ajuda' || p0 === 'help') return mensagemAjuda();
   if (p0 === 'produtos')             return listarProdutos();
+
+  // ── Sugestão 2: zerar com confirmação ────────────────────────────────────────────────────
+  if (p0 === 'zerar' && p1) {
+    const nomeCliente = palavras.slice(1).join(' ');
+    ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
+    // Limpa automaticamente após TTL para não poluir memória
+    setTimeout(() => { if (ZERAR_PENDENTE[jid]?.cliente === nomeCliente) delete ZERAR_PENDENTE[jid]; }, ZERAR_TTL_MS + 1000);
+    return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
+  }
+
+  // ── Sugestão 1: gerenciar aliases ────────────────────────────────────────────────────────
+  // "alias" — lista todos
+  if (p0 === 'aliases') {
+    const entradas = Object.entries(ALIASES);
+    if (!entradas.length) return '📋 Nenhum apelido cadastrado ainda.\n_Use: alias [apelido] [nome completo]_';
+    const linhas = entradas.map(([ap, nome]) => `  _${ap}_ → *${nome}*`).join('\n');
+    return `📋 *Apelidos cadastrados:*\n${linhas}`;
+  }
+  // "alias ray" (sem nome) — remove
+  // "alias ray Raylucas" — cadastra
+  if (p0 === 'alias') {
+    if (!p1) return '❌ Uso: _alias [apelido] [nome completo]_\nExemplo: _alias ray Raylucas_';
+    const nomeCompleto = palavras.slice(2).join(' ').trim();
+    if (!nomeCompleto) {
+      // Remove o alias
+      if (!ALIASES[norm(p1)]) return `⚠️ Apelido _${p1}_ não existe.`;
+      definirAlias(p1, null);
+      return `🗑️ Apelido _${p1}_ removido.`;
+    }
+    definirAlias(p1, capitalizarNome(nomeCompleto));
+    return `✅ Apelido salvo: _${norm(p1)}_ → *${capitalizarNome(nomeCompleto)}*\n_Agora você pode usar "${norm(p1)}" no lugar de "${capitalizarNome(nomeCompleto)}" em qualquer comando._`;
+  }
 
   if (p0 === 'preco' && p1) {
     const prodTrecho    = palavras.slice(1, -1).join(' ');
@@ -364,8 +422,20 @@ async function processarTexto(texto, jid, sock) {
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
+  // ── Sugestão 1: expandir alias no texto antes de parsear ─────────────────────────────────
+  // Se a primeira palavra é um alias conhecido, substitui pelo nome completo
+  let textoResolvido = texto;
+  {
+    const primeiraOriginal = texto.trim().split(/\s+/)[0];
+    const aliasResolvido   = resolverAlias(primeiraOriginal);
+    if (aliasResolvido) {
+      // Substitui SOMENTE a primeira palavra pelo nome completo
+      textoResolvido = aliasResolvido + texto.trim().slice(primeiraOriginal.length);
+    }
+  }
+
   // ── Venda à vista (pago na hora) — verificar ANTES do pagamento de dívida ──
-  const vista = parsearVendaVista(texto);
+  const vista = parsearVendaVista(textoResolvido);
   if (vista) {
     const msgs = [];
     for (const item of vista.itens) {
@@ -379,13 +449,13 @@ async function processarTexto(texto, jid, sock) {
     return msgs.join('\n');
   }
 
-  const pag = parsearPagamento(texto);
+  const pag = parsearPagamento(textoResolvido);
   if (pag) {
     if (pag.tipo === 'produto') { const r = await processarPagamentoProduto(pag.nome, pag.quantidade, pag.produto, jid, pag.metodo); return r.msg; }
     if (pag.tipo === 'valor')   { const r = await processarPagamentoValor(pag.nome, pag.valor, jid, pag.metodo); return r.msg; }
   }
 
-  const compra = parsearLinha(texto);
+  const compra = parsearLinha(textoResolvido);
   if (compra) {
     const msgs = [];
     for (const item of compra.itens) {

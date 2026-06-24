@@ -165,6 +165,44 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
+// ── Aliases de nome (sugestão 1) ──────────────────────────────────────────────────────────────────
+// Permite que apelidos sejam mapeados para o nome completo cadastrado na planilha.
+// Ex: "ray" → "Raylucas", "ju" → "Julia Souza"
+// Armazenado em aliases.json na raiz do projeto.
+const ALIASES_FILE = 'aliases.json';
+let ALIASES = {}; // { [normAlias]: nomeCompleto }
+try { if (fs.existsSync(ALIASES_FILE)) ALIASES = JSON.parse(fs.readFileSync(ALIASES_FILE, 'utf8')); } catch (e) {}
+
+function salvarAliases() {
+  try { fs.writeFileSync(ALIASES_FILE, JSON.stringify(ALIASES, null, 2), 'utf8'); } catch (e) {}
+}
+
+/**
+ * Resolve um alias para o nome completo, se existir.
+ * Retorna o nome completo cadastrado ou null se não houver alias.
+ * A busca é feita após norm() para ser case-insensitive e sem acento.
+ */
+function resolverAlias(digitado) {
+  if (!digitado) return null;
+  return ALIASES[norm(digitado)] || null;
+}
+
+/**
+ * Cadastra ou remove um alias.
+ * - cadastrar: alias('ray', 'Raylucas') → ALIASES['ray'] = 'Raylucas'
+ * - remover:   alias('ray', null)
+ */
+function definirAlias(apelido, nomeCompleto) {
+  const key = norm(apelido);
+  if (!key) return;
+  if (nomeCompleto === null || nomeCompleto === undefined) {
+    delete ALIASES[key];
+  } else {
+    ALIASES[key] = nomeCompleto.trim();
+  }
+  salvarAliases();
+}
+
 module.exports = {
   norm, capitalizarNome, agora, agoraData, soData, horaAtualSP,
   levenshtein, nomesFuzzyIguais, resolverNome, mesmoNome,
@@ -174,4 +212,6 @@ module.exports = {
   todosOsSinonimos, toProduto, toNumero, extrairValor,
   emojiProduto, nomeProdutoExib,
   ULTIMOS_LANCAMENTOS, pushLancamento,
+  // aliases
+  ALIASES, salvarAliases, resolverAlias, definirAlias,
 };
