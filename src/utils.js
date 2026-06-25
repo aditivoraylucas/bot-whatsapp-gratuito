@@ -1,8 +1,9 @@
-// ─── UTILITÁRIOS COMPARTILHADOS ──────────────────────────────────────────────
+// ─── UTILITÁRIOS COMPARTILHADOS ────────────────────────────────────────────────
 const fs   = require('fs');
 const path = require('path');
+const persist = require('./persist');
 
-// ── Normalização de texto ──────────────────────────────────────────────────────────────────────
+// ── Normalização de texto ───────────────────────────────────────────────────────────────────
 function norm(t) {
   return (t || '')
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
@@ -19,8 +20,6 @@ function capitalizarNome(n) {
 
 function agora() { return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function agoraData() { return new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
-// toLocaleString('pt-BR') gera "DD/MM/AAAA, HH:MM:SS" — o split(' ')[0] fica "DD/MM/AAAA," (com vírgula)
-// O replace(',', '') remove essa vírgula para que a comparação com agoraData() funcione corretamente
 function soData(str) { if (!str) return ''; return (str.trim().split(' ')[0] || str.trim()).replace(',', ''); }
 
 function horaAtualSP() {
@@ -28,7 +27,7 @@ function horaAtualSP() {
   return parseInt(formatter.format(new Date()));
 }
 
-// ── Levenshtein / fuzzy nome ────────────────────────────────────────────────────────────────
+// ── Levenshtein / fuzzy nome ──────────────────────────────────────────────────────────────────
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) => [i]);
@@ -60,38 +59,75 @@ function resolverNome(digitado, nomesConhecidos) {
 
 function mesmoNome(a, b) { return norm(a) === norm(b) || nomesFuzzyIguais(a, b); }
 
-// ── Retry com backoff ─────────────────────────────────────────────────────────────────────────
-async function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
-  for (let i = 0; i < tentativas; i++) {
+// ── Retry com backoff ───────────────────────────────────────────────────────────────────
+function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
+  let i = 0;
+  async function tentativa() {
     try {
       return await fn();
     } catch (err) {
       const isPrematureClose = err?.message?.includes('Premature close') || err?.message?.includes('fetch failed');
-      const isUltimaTentativa = i === tentativas - 1;
-      if (isPrematureClose && !isUltimaTentativa) {
-        const espera = (i + 1) * 2000;
-        console.log(`[${labelErro}] Tentativa ${i + 1}/${tentativas} falhou (${err.message}). Aguardando ${espera / 1000}s...`);
+      if (isPrematureClose && i < tentativas - 1) {
+        i++;
+        const espera = i * 2000;
+        console.log(`[${labelErro}] Tentativa ${i}/${tentativas} falhou. Aguardando ${espera / 1000}s...`);
         await new Promise(r => setTimeout(r, espera));
-      } else {
-        throw err;
+        return tentativa();
       }
+      throw err;
     }
   }
+  return tentativa();
 }
 
-// ── Produtos e preços ───────────────────────────────────────────────────────────────────────────
-const PRECOS_FILE = 'precos.json';
-let PRECOS = { trufa: 5.0, bolo: 12.0 };
-try { if (fs.existsSync(PRECOS_FILE)) PRECOS = JSON.parse(fs.readFileSync(PRECOS_FILE, 'utf8')); } catch (e) {}
-function salvarPrecos() { try { fs.writeFileSync(PRECOS_FILE, JSON.stringify(PRECOS), 'utf8'); } catch (e) {} }
+// ── Produtos e preços ───────────────────────────────────────────────────────────────────────────────
+// Preços carregados da env-var BOT_PRECOS (Render API) ou do fallback em disco.
+// Ao salvar, grava TANTO no arquivo local (acesso rápido) QUANTO na Render API
+// (sobrevive a deploys).
+const PRECOS_PADRAO = { trufa: 5.0, bolo: 12.0 };
+
+// 1º tenta env-var (injetada pelo Render na inicialização)
+// 2º tenta arquivo local (compatibilidade retroativa)
+// 3º usa padrão
+let PRECOS = persist.carregarPrecos(null);
+if (!PRECOS) {
+  try {
+    if (fs.existsSync('precos.json')) {
+      PRECOS = JSON.parse(fs.readFileSync('precos.json', 'utf8'));
+      console.log('[utils] PRECOS carregados de precos.json (legado).');
+    }
+  } catch (e) {}
+  if (!PRECOS) PRECOS = { ...PRECOS_PADRAO };
+}
+
+function salvarPrecos() {
+  // Grava localmente (rápido, sem dependência de rede)
+  try { fs.writeFileSync('precos.json', JSON.stringify(PRECOS), 'utf8'); } catch (e) {}
+  // Persiste na Render API (sobrevive a deploy)
+  persist.salvarPrecos(PRECOS);
+}
 
 const SINONIMOS = {
   trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons'],
   bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote'],
 };
-const SINONIMOS_EXTRA = {};
-try { if (fs.existsSync('sinonimos.json')) Object.assign(SINONIMOS_EXTRA, JSON.parse(fs.readFileSync('sinonimos.json', 'utf8'))); } catch (e) {}
-function salvarSinonimosExtra() { try { fs.writeFileSync('sinonimos.json', JSON.stringify(SINONIMOS_EXTRA), 'utf8'); } catch (e) {} }
+
+// Sinônimos extras: carrega da env-var BOT_SINONIMOS (Render API) ou do arquivo local
+let SINONIMOS_EXTRA = persist.carregarSinonimos(null);
+if (!SINONIMOS_EXTRA) {
+  try {
+    if (fs.existsSync('sinonimos.json')) {
+      SINONIMOS_EXTRA = JSON.parse(fs.readFileSync('sinonimos.json', 'utf8'));
+      console.log('[utils] SINONIMOS_EXTRA carregados de sinonimos.json (legado).');
+    }
+  } catch (e) {}
+  if (!SINONIMOS_EXTRA) SINONIMOS_EXTRA = {};
+}
+
+function salvarSinonimosExtra() {
+  try { fs.writeFileSync('sinonimos.json', JSON.stringify(SINONIMOS_EXTRA), 'utf8'); } catch (e) {}
+  persist.salvarSinonimos(SINONIMOS_EXTRA);
+}
 
 const NUMEROS_EXTENSO = {
   'um':1,'uma':1,'dois':2,'duas':2,'tres':3,'quatro':4,'cinco':5,
@@ -156,7 +192,7 @@ function nomeProdutoExib(produto) {
   return capitalizarNome(produto.replace(/_/g, ' '));
 }
 
-// ── Histórico de lançamentos (para cancelar) ─────────────────────────────────────────────────────
+// ── Histórico de lançamentos (para cancelar) ────────────────────────────────────────────
 const ULTIMOS_LANCAMENTOS = {};
 const MAX_HIST_CANCEL = 10;
 function pushLancamento(jid, obj) {
@@ -165,33 +201,30 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
-// ── Aliases de nome (sugestão 1) ──────────────────────────────────────────────────────────────────
-// Permite que apelidos sejam mapeados para o nome completo cadastrado na planilha.
-// Ex: "ray" → "Raylucas", "ju" → "Julia Souza"
-// Armazenado em aliases.json na raiz do projeto.
-const ALIASES_FILE = 'aliases.json';
-let ALIASES = {}; // { [normAlias]: nomeCompleto }
-try { if (fs.existsSync(ALIASES_FILE)) ALIASES = JSON.parse(fs.readFileSync(ALIASES_FILE, 'utf8')); } catch (e) {}
-
-function salvarAliases() {
-  try { fs.writeFileSync(ALIASES_FILE, JSON.stringify(ALIASES, null, 2), 'utf8'); } catch (e) {}
+// ── Aliases de nome ──────────────────────────────────────────────────────────────────────────────
+// Permite mapear apelidos ao nome completo cadastrado na planilha.
+// Armazenado na env-var BOT_ALIASES (Render API) para sobreviver a deploys.
+let ALIASES = persist.carregarAliases(null);
+if (!ALIASES) {
+  try {
+    if (fs.existsSync('aliases.json')) {
+      ALIASES = JSON.parse(fs.readFileSync('aliases.json', 'utf8'));
+      console.log('[utils] ALIASES carregados de aliases.json (legado).');
+    }
+  } catch (e) {}
+  if (!ALIASES) ALIASES = {};
 }
 
-/**
- * Resolve um alias para o nome completo, se existir.
- * Retorna o nome completo cadastrado ou null se não houver alias.
- * A busca é feita após norm() para ser case-insensitive e sem acento.
- */
+function salvarAliases() {
+  try { fs.writeFileSync('aliases.json', JSON.stringify(ALIASES, null, 2), 'utf8'); } catch (e) {}
+  persist.salvarAliases(ALIASES);
+}
+
 function resolverAlias(digitado) {
   if (!digitado) return null;
   return ALIASES[norm(digitado)] || null;
 }
 
-/**
- * Cadastra ou remove um alias.
- * - cadastrar: alias('ray', 'Raylucas') → ALIASES['ray'] = 'Raylucas'
- * - remover:   alias('ray', null)
- */
 function definirAlias(apelido, nomeCompleto) {
   const key = norm(apelido);
   if (!key) return;
@@ -212,6 +245,5 @@ module.exports = {
   todosOsSinonimos, toProduto, toNumero, extrairValor,
   emojiProduto, nomeProdutoExib,
   ULTIMOS_LANCAMENTOS, pushLancamento,
-  // aliases
   ALIASES, salvarAliases, resolverAlias, definirAlias,
 };
