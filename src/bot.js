@@ -3,13 +3,14 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCach
 const fs   = require('fs');
 const path = require('path');
 const pino = require('pino');
+const crypto = require('crypto');
 
 const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
 const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
 
-// ── Estado compartilhado ────────────────────────────────────────────────────────────────
+// ── Estado compartilhado ──────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -23,8 +24,7 @@ let tentativasReconexao   = 0;
 // Flag que impede restaurar sessão após loggedOut — só novo pairing resolve
 let sessaoInvalidada = false;
 
-// ── Deduplicação de mensagens ───────────────────────────────────────────────────────────
-// Evita reprocessar a mesma mensagem caso o Baileys dispare messages.upsert duplicado
+// ── Deduplicação de mensagens ─────────────────────────────────────────────────
 const mensagensProcessadas = new Set();
 const TTL_MENSAGEM_MS      = 30_000;
 
@@ -63,7 +63,7 @@ async function putEnvVarsRender(novas) {
   if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
 }
 
-// ── Limpa sessão corrompida (401 / loggedOut) ──────────────────────────────
+// ── Limpa sessão corrompida (401 / loggedOut) ─────────────────────────────────
 function limparSessaoLocal() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
@@ -81,40 +81,39 @@ async function limparSessaoNoRender() {
     await putEnvVarsRender(novas);
     console.log('[sessão] CREDS_JSON removido da Render API.');
     delete process.env.CREDS_JSON;
+    _hashSalvo = null;
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
-// ── Sessão persistente ────────────────────────────────────────────────────────────────────
-function restaurarSessao() {
-  if (sessaoInvalidada) {
-    console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
-    return false;
-  }
-  try {
-    const credsPath = path.join(AUTH_DIR, 'creds.json');
-    if (fs.existsSync(credsPath)) {
-      console.log('[restaurarSessao] Usando creds.json local existente.');
-      return true;
-    }
-    const credsJson = process.env.CREDS_JSON;
-    if (!credsJson) {
-      console.log('[restaurarSessao] CREDS_JSON não definido – será necessário novo pairing.');
-      return false;
-    }
-    if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-    fs.writeFileSync(credsPath, credsJson, 'utf8');
-    console.log('[restaurarSessao] Sessao restaurada do CREDS_JSON.');
-    return true;
-  } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
+// ── Fila de salvamento — evita PUT simultâneo e race condition ────────────────
+// Garante que apenas um PUT acontece por vez e sempre com o dado mais recente.
+let _salvandoAgora = false;
+let _salvarNovamente = false;
+let _hashSalvo = null; // hash MD5 do último CREDS_JSON salvo com sucesso
+
+function md5(str) {
+  return crypto.createHash('md5').update(str).digest('hex');
 }
 
 async function salvarSessaoNoRender() {
+  // Se já está salvando, marca para salvar de novo ao terminar
+  if (_salvandoAgora) {
+    _salvarNovamente = true;
+    return;
+  }
+
+  _salvandoAgora = true;
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (!fs.existsSync(credsPath)) return;
+
     const conteudo = fs.readFileSync(credsPath, 'utf8');
-    if (conteudo === process.env.CREDS_JSON) return;
+    const hash     = md5(conteudo);
+
+    // Evita PUT se o conteúdo não mudou desde o último save bem-sucedido
+    if (hash === _hashSalvo) return;
+
     const existente = await buscarEnvVarsRender();
     const novas = [
       ...existente.filter(v => v.key !== 'CREDS_JSON'),
@@ -122,11 +121,60 @@ async function salvarSessaoNoRender() {
     ];
     await putEnvVarsRender(novas);
     process.env.CREDS_JSON = conteudo;
+    _hashSalvo = hash;
     console.log('[sessão] CREDS_JSON atualizado na Render API.');
-  } catch (e) { console.error('[sessão] Erro ao salvar sessao:', e.message); }
+  } catch (e) {
+    console.error('[sessão] Erro ao salvar sessao:', e.message);
+  } finally {
+    _salvandoAgora = false;
+    // Se chegou nova solicitação durante o save, processa agora
+    if (_salvarNovamente) {
+      _salvarNovamente = false;
+      salvarSessaoNoRender();
+    }
+  }
 }
 
-// ── Determina se o disconnect exige limpeza total de sessão ──────────────────────
+// ── Sessão persistente ────────────────────────────────────────────────────────
+// Prioridade: 1º CREDS_JSON (env-var, sempre mais atualizada após deploy)
+//             2º creds.json local (só usado se CREDS_JSON não existe)
+function restaurarSessao() {
+  if (sessaoInvalidada) {
+    console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
+    return false;
+  }
+  try {
+    if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+
+    // 1º tenta CREDS_JSON da env-var (fonte mais confiável após deploy)
+    const credsJson = process.env.CREDS_JSON;
+    if (credsJson) {
+      // Só escreve no disco se o arquivo local for diferente ou não existir
+      const localExiste  = fs.existsSync(credsPath);
+      const localConteudo = localExiste ? fs.readFileSync(credsPath, 'utf8') : null;
+      if (!localExiste || md5(localConteudo) !== md5(credsJson)) {
+        fs.writeFileSync(credsPath, credsJson, 'utf8');
+        console.log('[restaurarSessao] creds.json atualizado a partir do CREDS_JSON (env-var).');
+      } else {
+        console.log('[restaurarSessao] creds.json local já está em sincronia com CREDS_JSON.');
+      }
+      _hashSalvo = md5(credsJson); // inicializa hash para evitar save imediato
+      return true;
+    }
+
+    // 2º tenta arquivo local (primeira execução sem env-var)
+    if (fs.existsSync(credsPath)) {
+      console.log('[restaurarSessao] Usando creds.json local (sem CREDS_JSON na env-var).');
+      return true;
+    }
+
+    console.log('[restaurarSessao] Nenhuma sessão encontrada — será necessário novo pairing.');
+    return false;
+  } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
+}
+
+// ── Determina se o disconnect exige limpeza total de sessão ──────────────────
 function precisaLimparSessao(statusCode, errorMessage) {
   if (statusCode === DisconnectReason.loggedOut)           return true;
   if (statusCode === DisconnectReason.multideviceMismatch) return true;
@@ -138,7 +186,7 @@ function precisaLimparSessao(statusCode, errorMessage) {
   return false;
 }
 
-// ── iniciarBot ────────────────────────────────────────────────────────────────────────
+// ── iniciarBot ────────────────────────────────────────────────────────────────
 async function iniciarBot() {
   if (!sessaoInvalidada) {
     restaurarSessao();
@@ -191,13 +239,11 @@ async function iniciarBot() {
             const horaNum = horaAtualSP();
             const hoje    = agoraData();
 
-            // ── Lembretes de vencimento ──────────────────────────────────────
             if (horaNum === HORA_LEMBRETE && ultimoDiaLembrete !== hoje && jidGrupoGlobal) {
               ultimoDiaLembrete = hoje;
               await verificarLembretes(sock, jidGrupoGlobal);
             }
 
-            // ── Resumo do dia ────────────────────────────────────────────────
             if (horaNum === HORA_RESUMO && ultimoDiaResumo !== hoje && jidGrupoGlobal) {
               ultimoDiaResumo = hoje;
               await sock.sendMessage(jidGrupoGlobal, { text: await gerarResumoDiario() });
@@ -239,7 +285,6 @@ async function iniciarBot() {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
-        // ── Deduplicação: ignora mensagem já processada nos últimos 30s ──
         const msgId = msg?.key?.id;
         if (msgId) {
           if (mensagensProcessadas.has(msgId)) {
@@ -269,7 +314,6 @@ async function iniciarBot() {
               { logger, reuploadRequest: sock.updateMediaMessage }
             );
 
-            // Valida buffer antes de enviar pro Groq
             if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 1000) {
               console.warn(`[áudio] Buffer inválido ou muito pequeno (${buffer?.length ?? 0} bytes) — ignorando.`);
               continue;
