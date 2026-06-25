@@ -1,7 +1,4 @@
 // ─── Módulo de relatórios extraído de sheets.js ───────────────────────────────────
-// Responsabilidade: leitura e formatação de relatórios. Não grava nada no Sheets.
-// Dependências injetadas via createSheetsReports({ getRows, HDR_SALDO, HDR_HIST })
-
 const {
   norm,
   capitalizarNome,
@@ -11,7 +8,6 @@ const {
   nomeProdutoExib,
 } = require('./utils');
 
-// Ordenações suportadas: 'valor' (desc, padrão) | 'nome' (az) | 'data' (mais recente primeiro)
 function ordenarClientes(entries, ordem) {
   switch (norm(ordem || 'valor')) {
     case 'nome':  return [...entries].sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
@@ -23,9 +19,15 @@ function ordenarClientes(entries, ordem) {
   }
 }
 
+// Converte "DD/MM/YYYY" ou "DD/MM/YYYY HH:MM" para Date
+function parseDateBR(str) {
+  const s = (str || '').trim().split(' ')[0].split('/');
+  if (s.length < 3) return null;
+  return new Date(`${s[2]}-${s[1].padStart(2,'0')}-${s[0].padStart(2,'0')}`);
+}
+
 function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
 
-  // ordem: 'valor' (padrão) | 'nome' | 'data'
   async function gerarRelatorioGeral(ordem) {
     try {
       const rows = await getRows('Saldo', HDR_SALDO);
@@ -40,7 +42,6 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
         if (!clientes[nome]) clientes[nome] = { itens: [], totalDevido: 0, ultimaCompra: row.UltimaCompra || '' };
         clientes[nome].itens.push({ produto: prod, quantidade: qtd, total });
         clientes[nome].totalDevido += total;
-        // mantém a data mais recente
         if (row.UltimaCompra > clientes[nome].ultimaCompra) clientes[nome].ultimaCompra = row.UltimaCompra;
       }
       if (!Object.keys(clientes).length) return 'Nenhuma dívida em aberto no momento.';
@@ -59,7 +60,6 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
     } catch (err) { console.error('Erro relatorio:', err.message); return '❌ Erro ao gerar relatório.'; }
   }
 
-  // opts: string (filtroMes) OU { filtroMes, ordem } — retrocompatível
   async function carregarHistoricoAgrupado(opts) {
     const filtroMes = typeof opts === 'string' ? opts : (opts && opts.filtroMes) || null;
     const rowsSaldo = await getRows('Saldo', HDR_SALDO);
@@ -249,13 +249,9 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
             clientesSet.add(nome);
           } else if (m.tipo === 'Pagamento') {
             const met = norm(m.metodo || '');
-            if (met === 'pix' || met === 'transferiu' || met === 'transferencia') {
-              totalPix += m.valor;
-            } else if (met === 'dinheiro' || met === 'especie' || met === 'avista' || met === 'vista') {
-              totalDinheiro += m.valor;
-            } else {
-              totalOutros += m.valor;
-            }
+            if (met === 'pix' || met === 'transferiu' || met === 'transferencia') totalPix += m.valor;
+            else if (met === 'dinheiro' || met === 'especie' || met === 'avista' || met === 'vista') totalDinheiro += m.valor;
+            else totalOutros += m.valor;
           }
         }
       }
@@ -282,6 +278,95 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
     } catch (err) { console.error('Erro resumo:', err.message); return '❌ Erro ao gerar resumo.'; }
   }
 
+  // ── Relatório por período: hoje | semana | mes ─────────────────────────────────
+  async function gerarRelatorioPeriodo(tipo) {
+    try {
+      const agora  = new Date();
+      const hoje   = agoraData(); // DD/MM/YYYY
+
+      // Define intervalo
+      let dataInicio, labelPeriodo;
+      if (tipo === 'hoje') {
+        dataInicio   = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
+        labelPeriodo = `Hoje (${hoje})`;
+      } else if (tipo === 'semana') {
+        const diasPassados = agora.getDay() === 0 ? 6 : agora.getDay() - 1; // seg=0
+        dataInicio   = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() - diasPassados);
+        const ddIni  = String(dataInicio.getDate()).padStart(2,'0');
+        const mmIni  = String(dataInicio.getMonth()+1).padStart(2,'0');
+        labelPeriodo = `Esta semana (${ddIni}/${mmIni} – ${hoje})`;
+      } else { // mes
+        dataInicio   = new Date(agora.getFullYear(), agora.getMonth(), 1);
+        const nomesMes = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+        labelPeriodo = `${nomesMes[agora.getMonth()]} ${agora.getFullYear()}`;
+      }
+
+      const { historico } = await carregarHistoricoAgrupado();
+      const clientes = {};
+
+      for (const [nome, movs] of Object.entries(historico)) {
+        const movsPerido = movs.filter(m => {
+          const d = parseDateBR(m.data);
+          return d && d >= dataInicio;
+        });
+        if (!movsPerido.length) continue;
+
+        let comprado = 0, pago = 0, pix = 0, dinheiro = 0, outros = 0;
+        const itens = {};
+        for (const m of movsPerido) {
+          if (m.tipo === 'Compra') {
+            comprado += m.valor;
+            itens[m.produto] = (itens[m.produto] || 0) + parseInt(m.qtd || '1');
+          } else if (m.tipo === 'Pagamento') {
+            pago += m.valor;
+            const met = norm(m.metodo || '');
+            if (met === 'pix' || met === 'transferiu' || met === 'transferencia') pix += m.valor;
+            else if (met === 'dinheiro' || met === 'especie' || met === 'avista' || met === 'vista') dinheiro += m.valor;
+            else outros += m.valor;
+          }
+        }
+        clientes[nome] = { comprado, pago, pix, dinheiro, outros, itens, saldo: Math.max(0, comprado - pago) };
+      }
+
+      if (!Object.keys(clientes).length) return `Nenhuma movimentação registrada em *${labelPeriodo}*.`;
+
+      // Ordena: devedores primeiro (saldo desc), depois quitados
+      const ordenados = Object.entries(clientes).sort((a, b) => b[1].saldo - a[1].saldo);
+
+      let totalVendas = 0, totalPago = 0;
+      let resposta = `*📊 Relatório — ${labelPeriodo}*\n───────────────\n`;
+
+      for (const [nome, d] of ordenados) {
+        resposta += `\n*${nome}*\n`;
+        // Itens comprados
+        const produtosStr = Object.entries(d.itens)
+          .map(([p, q]) => `${q}x ${nomeProdutoExib(p)}`).join(', ');
+        if (produtosStr) resposta += `  Comprou: ${produtosStr} = R$ ${d.comprado.toFixed(2)}\n`;
+        // Pagamentos por método
+        if (d.pix > 0)      resposta += `  💳 Pix: R$ ${d.pix.toFixed(2)}\n`;
+        if (d.dinheiro > 0) resposta += `  💵 Dinheiro: R$ ${d.dinheiro.toFixed(2)}\n`;
+        if (d.outros > 0)   resposta += `  💰 Outros: R$ ${d.outros.toFixed(2)}\n`;
+        // Status
+        if (d.saldo > 0.001) {
+          resposta += `  🔴 *Deve: R$ ${d.saldo.toFixed(2)}*\n`;
+        } else if (d.comprado > 0) {
+          resposta += `  ✅ Quitado\n`;
+        } else {
+          resposta += `  💰 Só pagamentos\n`;
+        }
+        totalVendas += d.comprado;
+        totalPago   += d.pago;
+      }
+
+      const totalAberto = totalVendas - totalPago;
+      resposta += `\n───────────────`;
+      resposta += `\nTotal vendido: R$ ${totalVendas.toFixed(2)}`;
+      resposta += `\nTotal recebido: R$ ${totalPago.toFixed(2)}`;
+      resposta += `\n*A receber: R$ ${totalAberto.toFixed(2)}*`;
+      return resposta;
+    } catch (err) { console.error('Erro relatorio periodo:', err.message); return '❌ Erro ao gerar relatório por período.'; }
+  }
+
   return {
     gerarRelatorioGeral,
     carregarHistoricoAgrupado,
@@ -292,6 +377,7 @@ function createSheetsReports({ getRows, HDR_SALDO, HDR_HIST }) {
     gerarHistoricoCliente,
     gerarRelatorioMes,
     gerarResumoDiario,
+    gerarRelatorioPeriodo,
   };
 }
 

@@ -1,8 +1,4 @@
 // ─── GOOGLE SHEETS — lógica de negócio ────────────────────────────────────────────
-// Responsabilidade: operações de negócio (registrar, pagar, cancelar, zerar).
-// Infra (auth, HTTP, CRUD de linhas) → sheets/auth.js e sheets/core.js
-// Relatórios → sheetsReports.js
-// ─────────────────────────────────────────────────────────────────────────────
 const { LIMITE_CREDITO_PADRAO } = require('./config');
 const {
   comRetry, norm, capitalizarNome, mesmoNome, resolverNome,
@@ -16,7 +12,6 @@ const {
   getRows, appendRow, updateRow, deleteRows,
 } = require('./sheets/core');
 
-// ── Registrar compra fiado ────────────────────────────────────────────────────
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const meta      = await getSheetsMeta();
@@ -54,7 +49,6 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
 }
 
-// ── Venda à vista ───────────────────────────────────────────────────────────
 async function registrarVendaVista(clienteEnviado, produto, quantidade, metodo) {
   try {
     const meta     = await getSheetsMeta();
@@ -75,7 +69,6 @@ async function registrarVendaVista(clienteEnviado, produto, quantidade, metodo) 
   } catch (err) { console.error('Erro venda à vista:', err.message); return null; }
 }
 
-// ── Cancelar último lançamento ───────────────────────────────────────────────
 async function cancelarLancamento(jid, nomeDigitado) {
   try {
     const hist = ULTIMOS_LANCAMENTOS[jid] || [];
@@ -139,7 +132,6 @@ async function cancelarLancamento(jid, nomeDigitado) {
   } catch (err) { console.error('Erro cancelar:', err.message); return '❌ Erro ao cancelar lançamento.'; }
 }
 
-// ── Pagamento por produto ──────────────────────────────────────────────────
 async function processarPagamentoProduto(clienteEnviado, quantidade, produto, jid, metodo) {
   try {
     const meta      = await getSheetsMeta();
@@ -168,7 +160,6 @@ async function processarPagamentoProduto(clienteEnviado, quantidade, produto, ji
   } catch (err) { console.error('Erro pag produto:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
-// ── Pagamento por valor ───────────────────────────────────────────────────
 async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
   try {
     const meta      = await getSheetsMeta();
@@ -211,7 +202,6 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
   } catch (err) { console.error('Erro pag valor:', err.message); return { ok: false, msg: '❌ Erro ao registrar pagamento.' }; }
 }
 
-// ── Verificar lembretes ───────────────────────────────────────────────────
 async function verificarLembretes(sock, jid) {
   const { DIAS_LEMBRETE } = require('./config');
   try {
@@ -238,7 +228,6 @@ async function verificarLembretes(sock, jid) {
   } catch (e) { console.error('Erro lembrete:', e.message); }
 }
 
-// ── Zerar cliente ────────────────────────────────────────────────────────────
 async function zerarCliente(nomeDigitado) {
   try {
     const meta      = await getSheetsMeta();
@@ -258,6 +247,53 @@ async function zerarCliente(nomeDigitado) {
   } catch (err) { console.error('Erro zerar:', err.message); return '❌ Erro ao zerar cliente.'; }
 }
 
+// ── Renomear cliente (corrige nome errado em Saldo e Histórico) ────────────────
+async function renomearCliente(nomeAntigo, nomeNovo) {
+  try {
+    const meta      = await getSheetsMeta();
+    const saldoProp = await ensureSaldoSheet(meta);
+    await getOrCreateHistSheet(meta);
+
+    const rowsSaldo = await getRows('Saldo', HDR_SALDO);
+    const nomesConhecidos = [...new Set(rowsSaldo.map(r => r.Cliente.trim()).filter(Boolean))];
+    const nomeCanon = resolverNome(nomeAntigo, nomesConhecidos);
+    if (!nomeCanon) {
+      // tenta no histórico também
+      const rowsHist = await getRows('Historico', HDR_HIST);
+      const nomesHist = [...new Set(rowsHist.map(r => r.Cliente.trim()).filter(Boolean))];
+      const canonHist = resolverNome(nomeAntigo, nomesHist);
+      if (!canonHist) return `❌ Cliente *${capitalizarNome(nomeAntigo)}* não encontrado.`;
+    }
+
+    const nomeCanonFinal = nomeCanon || capitalizarNome(nomeAntigo);
+    const novoNomeFormatado = capitalizarNome(nomeNovo);
+    let alteracoesSaldo = 0, alteracoesHist = 0;
+
+    // Atualiza aba Saldo
+    const rowsSaldoAtual = await getRows('Saldo', HDR_SALDO);
+    for (const row of rowsSaldoAtual) {
+      if (row.Cliente.trim() === nomeCanonFinal) {
+        await updateRow('Saldo', HDR_SALDO, row._rowIndex, { ...row, Cliente: novoNomeFormatado });
+        alteracoesSaldo++;
+      }
+    }
+
+    // Atualiza aba Historico
+    const rowsHistAtual = await getRows('Historico', HDR_HIST);
+    for (const row of rowsHistAtual) {
+      if (row.Cliente.trim() === nomeCanonFinal) {
+        await updateRow('Historico', HDR_HIST, row._rowIndex, { ...row, Cliente: novoNomeFormatado });
+        alteracoesHist++;
+      }
+    }
+
+    if (alteracoesSaldo === 0 && alteracoesHist === 0)
+      return `❌ Nenhuma linha encontrada para *${nomeCanonFinal}*.`;
+
+    return `✅ Nome atualizado: *${nomeCanonFinal}* → *${novoNomeFormatado}*\n(${alteracoesSaldo} linha(s) no Saldo, ${alteracoesHist} linha(s) no Histórico)`;
+  } catch (err) { console.error('Erro renomear:', err.message); return '❌ Erro ao renomear cliente.'; }
+}
+
 // ── Relatórios (delegados para sheetsReports.js) ─────────────────────────────
 const { createSheetsReports } = require('./sheetsReports');
 const _reports = createSheetsReports({ getRows, HDR_SALDO, HDR_HIST });
@@ -266,6 +302,7 @@ module.exports = {
   getDoc: async () => ({}), getSheetSaldo: async () => ({}), getSheetHistorico: async () => ({}),
   registrarOuAcumular, registrarVendaVista, cancelarLancamento,
   processarPagamentoProduto, processarPagamentoValor,
+  renomearCliente,
   gerarRelatorioGeral:      _reports.gerarRelatorioGeral,
   gerarRelatorioDetalhado:  _reports.gerarRelatorioDetalhado,
   gerarRelatorioQuitados:   _reports.gerarRelatorioQuitados,
@@ -273,6 +310,7 @@ module.exports = {
   gerarHistoricoCliente:    _reports.gerarHistoricoCliente,
   gerarRelatorioMes:        _reports.gerarRelatorioMes,
   gerarResumoDiario:        _reports.gerarResumoDiario,
+  gerarRelatorioPeriodo:    _reports.gerarRelatorioPeriodo,
   verificarLembretes, zerarCliente,
   carregarHistoricoAgrupado: _reports.carregarHistoricoAgrupado,
 };
