@@ -81,14 +81,8 @@ function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
 }
 
 // ── Produtos e preços ───────────────────────────────────────────────────────────────────────────────
-// Preços carregados da env-var BOT_PRECOS (Render API) ou do fallback em disco.
-// Ao salvar, grava TANTO no arquivo local (acesso rápido) QUANTO na Render API
-// (sobrevive a deploys).
 const PRECOS_PADRAO = { trufa: 5.0, bolo: 12.0 };
 
-// 1º tenta env-var (injetada pelo Render na inicialização)
-// 2º tenta arquivo local (compatibilidade retroativa)
-// 3º usa padrão
 let PRECOS = persist.carregarPrecos(null);
 if (!PRECOS) {
   try {
@@ -101,18 +95,24 @@ if (!PRECOS) {
 }
 
 function salvarPrecos() {
-  // Grava localmente (rápido, sem dependência de rede)
   try { fs.writeFileSync('precos.json', JSON.stringify(PRECOS), 'utf8'); } catch (e) {}
-  // Persiste na Render API (sobrevive a deploy)
   persist.salvarPrecos(PRECOS);
 }
 
 const SINONIMOS = {
-  trufa: ['trufa', 'trufas', 'trufinha', 'trufinhas', 'bombom', 'bombons'],
+  trufa: [
+    'trufa', 'trufas', 'trufinha', 'trufinhas',
+    // bombom = mesmo produto
+    'bombom', 'bombons', 'bombon',
+    // erros fonéticos comuns de voz (Whisper)
+    'momon', 'monom', 'momom', 'mombon', 'mombon', 'bombon',
+    'bombon', 'bonbon', 'bonbom', 'bonbons',
+    'pompon', 'pompom',
+  ],
   bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote'],
 };
 
-// Sinônimos extras: carrega da env-var BOT_SINONIMOS (Render API) ou do arquivo local
+// Sinônimos extras persistidos
 let SINONIMOS_EXTRA = persist.carregarSinonimos(null);
 if (!SINONIMOS_EXTRA) {
   try {
@@ -202,8 +202,6 @@ function pushLancamento(jid, obj) {
 }
 
 // ── Aliases de nome ──────────────────────────────────────────────────────────────────────────────
-// Permite mapear apelidos ao nome completo cadastrado na planilha.
-// Armazenado na env-var BOT_ALIASES (Render API) para sobreviver a deploys.
 let ALIASES = persist.carregarAliases(null);
 if (!ALIASES) {
   try {

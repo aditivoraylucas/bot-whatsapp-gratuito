@@ -15,10 +15,13 @@ const CORRECOES_VOZ = {
   'cancelado':'cancelar','cancela':'cancelar','cancelas':'cancelar',
   'zera':'zerar','ajudas':'ajuda','produto':'produtos',
   'pagol':'pagou',
-  // NOTA: 'pago' NÃO é corrigido para 'pagou' — "pago no pix" é venda à vista, não pagamento de dívida
+  // NOTA: 'pago' NÃO é corrigido para 'pagou' — "pago no pix" é venda à vista
   'pics':'pix','pik':'pix',
   'transferio':'transferiu','transferiou':'transferiu',
-  'bombon':'bombom',
+  // Erros fonéticos de bombom/trufa
+  'bombon':'bombom','bonbon':'bombom','bonbom':'bombom',
+  'momon':'bombom','monom':'bombom','momom':'bombom',
+  'mombon':'bombom','pompon':'bombom','pompom':'bombom',
 };
 
 function corrigirPalavra(palavra) {
@@ -73,15 +76,28 @@ function levenshtein(a, b) {
 }
 
 /**
+ * Todos os sinônimos de todos os produtos — usados como alvo para correção fonética.
+ * Inclui os sinônimos hardcoded de utils.js para garantir que bombom/momon sejam alvos.
+ */
+function getAllSinonimos() {
+  const { todosOsSinonimos } = require('../utils');
+  const mapa = todosOsSinonimos();
+  const todos = new Set();
+  for (const sins of Object.values(mapa)) {
+    for (const s of sins) todos.add(norm(s));
+  }
+  return [...todos];
+}
+
+/**
  * Corrige palavras não reconhecidas que soam parecido com produtos cadastrados.
  *
- * Regras:
- *  - Só corrige palavras que NÃO são nomes de clientes, quantidades ou palavras reservadas
- *  - Distância máxima: 2 (para palavras curtas, <= 5 letras) ou 3 (para palavras longas)
- *  - Em caso de empate de distância, mantém a palavra original (não arrisca)
- *  - Palavras já reconhecidas como produto são mantidas
- *  - Se a transcrição não tem produto nenhum reconhecido E tem pelo menos uma
- *    palavra corrigível, injeta quantidade 1 caso não haja número na frase
+ * Melhorias v2:
+ *  - Compara contra TODOS os sinônimos (não só as chaves do PRECOS)
+ *    → "momon" bate em "bombom" (dist 3 em 6 letras) e é corrigido para o produto
+ *  - Distância máxima: comprimento_palavra * 0.5, mínimo 2, máximo 4
+ *    → Permite pegar variações fonéticas mais distantes em palavras longas
+ *  - Em caso de empate de distância, mantém a palavra original
  */
 const PALAVRAS_RESERVADAS_AUDIO = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
@@ -94,8 +110,16 @@ const PALAVRAS_RESERVADAS_AUDIO = new Set([
 function corrigirFoneticosProdutos(texto) {
   if (!texto) return texto;
 
+  const { toProduto, todosOsSinonimos } = require('../utils');
   const produtos = Object.keys(PRECOS);
   if (!produtos.length) return texto;
+
+  // Constrói mapa: sinonimo_normalizado → produto
+  const mapaAlvo = {};
+  for (const [prod, sins] of Object.entries(todosOsSinonimos())) {
+    for (const sin of sins) mapaAlvo[norm(sin)] = prod;
+  }
+  const sinonimosList = Object.keys(mapaAlvo);
 
   const palavras = texto.trim().split(/\s+/);
   let corrigido = false;
@@ -103,35 +127,32 @@ function corrigirFoneticosProdutos(texto) {
   const resultado = palavras.map(palavra => {
     const n = norm(palavra);
 
-    // Já é uma palavra reservada ou número — não toca
     if (PALAVRAS_RESERVADAS_AUDIO.has(n)) return palavra;
     if (/^\d+([,.]\d+)?$/.test(n)) return palavra;
+    if (toProduto(n)) return palavra; // já reconhecido
 
-    // Já é um produto reconhecido — mantém
-    const { toProduto } = require('../utils');
-    if (toProduto(n)) return palavra;
+    // Distância máxima dinâmica: 50% do comprimento, entre 2 e 4
+    const MAX_DIST = Math.min(4, Math.max(2, Math.floor(n.length * 0.5)));
+    let melhorSin  = null;
+    let melhorDist = Infinity;
+    let empate     = false;
 
-    // Busca produto mais próximo foneticamente
-    const MAX_DIST = n.length <= 5 ? 2 : 3;
-    let melhorProduto = null;
-    let melhorDist    = Infinity;
-    let empate        = false;
-
-    for (const prod of produtos) {
-      const dist = levenshtein(n, norm(prod));
+    for (const sin of sinonimosList) {
+      const dist = levenshtein(n, sin);
       if (dist < melhorDist) {
-        melhorDist    = dist;
-        melhorProduto = prod;
-        empate        = false;
+        melhorDist = dist;
+        melhorSin  = sin;
+        empate     = false;
       } else if (dist === melhorDist) {
         empate = true;
       }
     }
 
-    if (!empate && melhorProduto && melhorDist <= MAX_DIST) {
-      console.log(`[áudio] correção fonética: "${palavra}" → "${melhorProduto}" (dist ${melhorDist})`);
+    if (!empate && melhorSin && melhorDist <= MAX_DIST) {
+      const prodAlvo = mapaAlvo[melhorSin];
+      console.log(`[áudio] correção fonética: "${palavra}" → "${prodAlvo}" via "${melhorSin}" (dist ${melhorDist})`);
       corrigido = true;
-      return melhorProduto;
+      return prodAlvo;
     }
 
     return palavra;
@@ -139,13 +160,10 @@ function corrigirFoneticosProdutos(texto) {
 
   let textoCorrigido = resultado.join(' ');
 
-  // Se houve correção e não há número na frase, injeta "1" antes do produto
   if (corrigido) {
     const temNumero = /\b(\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez)\b/.test(norm(textoCorrigido));
     if (!temNumero) {
-      // Injeta "1" antes da primeira palavra que é produto
-      const { toProduto } = require('../utils');
-      const partes = textoCorrigido.split(/\s+/);
+      const partes  = textoCorrigido.split(/\s+/);
       const idxProd = partes.findIndex(p => toProduto(norm(p)));
       if (idxProd > 0) {
         partes.splice(idxProd, 0, '1');
