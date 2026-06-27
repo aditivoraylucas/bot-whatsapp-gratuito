@@ -17,7 +17,7 @@ const {
   renomearCliente, gerarRelatorioPeriodo,
 } = require('./sheets');
 const {
-  transcreverAudio, limparTranscricao, corrigirTranscricao, dedupNomeInicio,
+  transcreverAudio, limparTranscricao, corrigirTranscricao, corrigirFoneticosProdutos, dedupNomeInicio,
 } = require('./handlers/audio');
 const {
   mudarPreco, cadastrarNovoProduto, listarProdutos, mensagemAjuda,
@@ -169,7 +169,7 @@ async function processarTexto(texto, jid, sock) {
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
   // ── Confirmação de zerar pendente ─────────────────────────────────────────
-if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
+  if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     const { cliente, expira } = ZERAR_PENDENTE[jid];
     delete ZERAR_PENDENTE[jid];
     if (Date.now() > expira) return `⏱️ Tempo expirado. Digite novamente _zerar ${cliente}_ para tentar de novo.`;
@@ -179,9 +179,8 @@ if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     delete ZERAR_PENDENTE[jid];
   }
 
-  // ── renomear [nome antigo] > [nome novo] ─────────────────────────────────
+  // ── renomear ─────────────────────────────────────────────────────────────
   if (p0 === 'renomear') {
-    // Aceita: "renomear Lucas com K > Lucas" ou "renomear Lucas com K para Lucas"
     const textoResto = texto.trim().slice('renomear'.length).trim();
     const sep = textoResto.includes('>') ? '>' : textoResto.includes(' para ') ? ' para ' : null;
     if (!sep) return '❌ Uso: _renomear [nome antigo] > [nome novo]_\nExemplo: _renomear Lucas com K > Lucas_';
@@ -192,7 +191,7 @@ if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     return await renomearCliente(nomeAntigo, nomeNovo);
   }
 
-  // ── relatorio hoje / semana / mes ────────────────────────────────────────
+  // ── relatorio ─────────────────────────────────────────────────────────────
   if (p0 === 'relatorio' || p0 === 'relatorios') {
     if (p1 === 'hoje')                         return await gerarRelatorioPeriodo('hoje');
     if (p1 === 'semana')                       return await gerarRelatorioPeriodo('semana');
@@ -210,7 +209,7 @@ if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
   if (p0 === 'ajuda' || p0 === 'help') return mensagemAjuda();
   if (p0 === 'produtos')             return listarProdutos();
 
-  // ── Zerar com confirmação ─────────────────────────────────────────────────────────
+  // ── Zerar com confirmação ─────────────────────────────────────────────────
   if (p0 === 'zerar' && p1) {
     const nomeCliente = palavras.slice(1).join(' ');
     ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
@@ -218,8 +217,8 @@ if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
   }
 
-  // ── Gerenciar aliases ───────────────────────────────────────────────────────
-if (p0 === 'aliases') {
+  // ── Aliases ───────────────────────────────────────────────────────────────
+  if (p0 === 'aliases') {
     const entradas = Object.entries(ALIASES);
     if (!entradas.length) return '📋 Nenhum apelido cadastrado ainda.\n_Use: alias [apelido] [nome completo]_';
     const linhas = entradas.map(([ap, nome]) => `  _${ap}_ → *${nome}*`).join('\n');
@@ -254,8 +253,8 @@ if (p0 === 'aliases') {
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
-  // ── Expandir alias antes de parsear ──────────────────────────────────────────
-let textoResolvido = texto;
+  // ── Expandir alias ────────────────────────────────────────────────────────
+  let textoResolvido = texto;
   {
     const primeiraOriginal = texto.trim().split(/\s+/)[0];
     const aliasResolvido   = resolverAlias(primeiraOriginal);
@@ -264,8 +263,8 @@ let textoResolvido = texto;
     }
   }
 
-  // ── Venda à vista ───────────────────────────────────────────────────────────
-const vista = parsearVendaVista(textoResolvido);
+  // ── Venda à vista ─────────────────────────────────────────────────────────
+  const vista = parsearVendaVista(textoResolvido);
   if (vista) {
     const msgs = [];
     for (const item of vista.itens) {
@@ -305,6 +304,6 @@ const vista = parsearVendaVista(textoResolvido);
 }
 
 module.exports = {
-  transcreverAudio, limparTranscricao, corrigirTranscricao, dedupNomeInicio,
+  transcreverAudio, limparTranscricao, corrigirTranscricao, corrigirFoneticosProdutos, dedupNomeInicio,
   processarTexto, mensagemAjuda,
 };

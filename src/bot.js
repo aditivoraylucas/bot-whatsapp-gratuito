@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
 const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
-const { transcreverAudio, limparTranscricao, corrigirTranscricao, processarTexto } = require('./handlers');
+const { transcreverAudio, limparTranscricao, corrigirTranscricao, corrigirFoneticosProdutos, processarTexto } = require('./handlers');
 
 // ── Estado compartilhado ──────────────────────────────────────────────────────
 let botConectado          = false;
@@ -86,34 +86,24 @@ async function limparSessaoNoRender() {
 }
 
 // ── Fila de salvamento — evita PUT simultâneo e race condition ────────────────
-// Garante que apenas um PUT acontece por vez e sempre com o dado mais recente.
-let _salvandoAgora = false;
+let _salvandoAgora  = false;
 let _salvarNovamente = false;
-let _hashSalvo = null; // hash MD5 do último CREDS_JSON salvo com sucesso
+let _hashSalvo      = null;
 
 function md5(str) {
   return crypto.createHash('md5').update(str).digest('hex');
 }
 
 async function salvarSessaoNoRender() {
-  // Se já está salvando, marca para salvar de novo ao terminar
-  if (_salvandoAgora) {
-    _salvarNovamente = true;
-    return;
-  }
-
+  if (_salvandoAgora) { _salvarNovamente = true; return; }
   _salvandoAgora = true;
   try {
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
     const credsPath = path.join(AUTH_DIR, 'creds.json');
     if (!fs.existsSync(credsPath)) return;
-
     const conteudo = fs.readFileSync(credsPath, 'utf8');
     const hash     = md5(conteudo);
-
-    // Evita PUT se o conteúdo não mudou desde o último save bem-sucedido
     if (hash === _hashSalvo) return;
-
     const existente = await buscarEnvVarsRender();
     const novas = [
       ...existente.filter(v => v.key !== 'CREDS_JSON'),
@@ -127,17 +117,11 @@ async function salvarSessaoNoRender() {
     console.error('[sessão] Erro ao salvar sessao:', e.message);
   } finally {
     _salvandoAgora = false;
-    // Se chegou nova solicitação durante o save, processa agora
-    if (_salvarNovamente) {
-      _salvarNovamente = false;
-      salvarSessaoNoRender();
-    }
+    if (_salvarNovamente) { _salvarNovamente = false; salvarSessaoNoRender(); }
   }
 }
 
 // ── Sessão persistente ────────────────────────────────────────────────────────
-// Prioridade: 1º CREDS_JSON (env-var, sempre mais atualizada após deploy)
-//             2º creds.json local (só usado se CREDS_JSON não existe)
 function restaurarSessao() {
   if (sessaoInvalidada) {
     console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
@@ -146,12 +130,9 @@ function restaurarSessao() {
   try {
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
     const credsPath = path.join(AUTH_DIR, 'creds.json');
-
-    // 1º tenta CREDS_JSON da env-var (fonte mais confiável após deploy)
     const credsJson = process.env.CREDS_JSON;
     if (credsJson) {
-      // Só escreve no disco se o arquivo local for diferente ou não existir
-      const localExiste  = fs.existsSync(credsPath);
+      const localExiste   = fs.existsSync(credsPath);
       const localConteudo = localExiste ? fs.readFileSync(credsPath, 'utf8') : null;
       if (!localExiste || md5(localConteudo) !== md5(credsJson)) {
         fs.writeFileSync(credsPath, credsJson, 'utf8');
@@ -159,22 +140,18 @@ function restaurarSessao() {
       } else {
         console.log('[restaurarSessao] creds.json local já está em sincronia com CREDS_JSON.');
       }
-      _hashSalvo = md5(credsJson); // inicializa hash para evitar save imediato
+      _hashSalvo = md5(credsJson);
       return true;
     }
-
-    // 2º tenta arquivo local (primeira execução sem env-var)
     if (fs.existsSync(credsPath)) {
       console.log('[restaurarSessao] Usando creds.json local (sem CREDS_JSON na env-var).');
       return true;
     }
-
     console.log('[restaurarSessao] Nenhuma sessão encontrada — será necessário novo pairing.');
     return false;
   } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
 }
 
-// ── Determina se o disconnect exige limpeza total de sessão ──────────────────
 function precisaLimparSessao(statusCode, errorMessage) {
   if (statusCode === DisconnectReason.loggedOut)           return true;
   if (statusCode === DisconnectReason.multideviceMismatch) return true;
@@ -188,9 +165,7 @@ function precisaLimparSessao(statusCode, errorMessage) {
 
 // ── iniciarBot ────────────────────────────────────────────────────────────────
 async function iniciarBot() {
-  if (!sessaoInvalidada) {
-    restaurarSessao();
-  }
+  if (!sessaoInvalidada) restaurarSessao();
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version }          = await fetchLatestBaileysVersion();
@@ -238,17 +213,14 @@ async function iniciarBot() {
           try {
             const horaNum = horaAtualSP();
             const hoje    = agoraData();
-
             if (horaNum === HORA_LEMBRETE && ultimoDiaLembrete !== hoje && jidGrupoGlobal) {
               ultimoDiaLembrete = hoje;
               await verificarLembretes(sock, jidGrupoGlobal);
             }
-
             if (horaNum === HORA_RESUMO && ultimoDiaResumo !== hoje && jidGrupoGlobal) {
               ultimoDiaResumo = hoje;
               await sock.sendMessage(jidGrupoGlobal, { text: await gerarResumoDiario() });
             }
-
           } catch (e) { console.error('Erro agendamento:', e.message); }
         }, 60 * 60 * 1000);
       }
@@ -305,7 +277,7 @@ async function iniciarBot() {
         if (!norm(nomeGrupo).includes(norm(GRUPO_NOME))) continue;
         jidGrupoGlobal = jid;
 
-        // ── Áudio ──
+        // ── Áudio ──────────────────────────────────────────────────────────────
         const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {
           try {
@@ -319,19 +291,39 @@ async function iniciarBot() {
               continue;
             }
 
-            const mimeType       = audioMsg.mimetype || 'audio/ogg; codecs=opus';
-            const textoRaw       = await transcreverAudio(buffer, mimeType);
+            const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
+            const textoRaw = await transcreverAudio(buffer, mimeType);
+
             if (textoRaw) {
-              const textoTranscrito = corrigirTranscricao(limparTranscricao(textoRaw));
+              // Pipeline de correção: limpeza → correção de voz → correção fonética
+              const textoCorrigido = corrigirFoneticosProdutos(
+                corrigirTranscricao(
+                  limparTranscricao(textoRaw)
+                )
+              );
               console.log('Transcrição:', textoRaw);
-              const resposta = await processarTexto(textoTranscrito, jid, sock);
-              if (resposta) await sock.sendMessage(jid, { text: `🎤 _"${textoRaw}"_\n\n${resposta}` });
+              if (textoCorrigido !== limparTranscricao(textoRaw)) {
+                console.log('Transcrição corrigida:', textoCorrigido);
+              }
+
+              const resposta = await processarTexto(textoCorrigido, jid, sock);
+              if (resposta) {
+                // Confirmação: mostra o que o bot entendeu + resultado
+                await sock.sendMessage(jid, {
+                  text: `🎤 _"${textoRaw}"_\n\n${resposta}`,
+                });
+              } else {
+                // Áudio não reconhecido — avisa para reenviar
+                await sock.sendMessage(jid, {
+                  text: `🎤 _"${textoRaw}"_\n\n⚠️ Não entendi esse áudio. Tente reenviar ou digite o comando.`,
+                });
+              }
             }
           } catch (e) { console.error('Erro ao processar áudio:', e.message); }
           continue;
         }
 
-        // ── Texto ──
+        // ── Texto ───────────────────────────────────────────────────────────────
         const textMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
         if (!textMsg.trim()) continue;
         const resposta = await processarTexto(textMsg, jid, sock);

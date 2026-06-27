@@ -4,7 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const FormData = require('form-data');
 const { GROQ_API_KEY } = require('../config');
-const { norm } = require('../utils');
+const { norm, PRECOS } = require('../utils');
 
 // ── Correções de transcrição de voz ──────────────────────────────────────────
 const CORRECOES_VOZ = {
@@ -41,11 +41,6 @@ function corrigirTranscricao(texto) {
 
 /**
  * Remove palavras duplicadas CONSECUTIVAS no início da frase.
- * Exemplos:
- *   "Rodrigo Rodrigo um bolo"  →  "Rodrigo um bolo"
- *   "Ana Maria Ana Maria 2 trufas"  →  "Ana Maria 2 trufas"
- *   "Carlos Carlos pagou 10"  →  "Carlos pagou 10"
- * Não afeta: "Ana e Maria" (palavras diferentes), meio da frase, etc.
  */
 function dedupNomeInicio(texto) {
   if (!texto) return texto;
@@ -61,6 +56,106 @@ function dedupNomeInicio(texto) {
     }
   }
   return texto;
+}
+
+// ── Distância de Levenshtein ──────────────────────────────────────────────────
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) =>
+    Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+  return dp[m][n];
+}
+
+/**
+ * Corrige palavras não reconhecidas que soam parecido com produtos cadastrados.
+ *
+ * Regras:
+ *  - Só corrige palavras que NÃO são nomes de clientes, quantidades ou palavras reservadas
+ *  - Distância máxima: 2 (para palavras curtas, <= 5 letras) ou 3 (para palavras longas)
+ *  - Em caso de empate de distância, mantém a palavra original (não arrisca)
+ *  - Palavras já reconhecidas como produto são mantidas
+ *  - Se a transcrição não tem produto nenhum reconhecido E tem pelo menos uma
+ *    palavra corrigível, injeta quantidade 1 caso não haja número na frase
+ */
+const PALAVRAS_RESERVADAS_AUDIO = new Set([
+  'pagou','pix','transferiu','depositou','mandou','enviou',
+  'cancelar','saldo','historico','relatorio','resumo',
+  'cobrar','lembrete','lembretes','preco','produtos','zerar','novo','renomear',
+  'sim','nao','um','uma','dois','duas','tres','quatro','cinco',
+  'seis','sete','oito','nove','dez','e','de','mais','para','no','na',
+]);
+
+function corrigirFoneticosProdutos(texto) {
+  if (!texto) return texto;
+
+  const produtos = Object.keys(PRECOS);
+  if (!produtos.length) return texto;
+
+  const palavras = texto.trim().split(/\s+/);
+  let corrigido = false;
+
+  const resultado = palavras.map(palavra => {
+    const n = norm(palavra);
+
+    // Já é uma palavra reservada ou número — não toca
+    if (PALAVRAS_RESERVADAS_AUDIO.has(n)) return palavra;
+    if (/^\d+([,.]\d+)?$/.test(n)) return palavra;
+
+    // Já é um produto reconhecido — mantém
+    const { toProduto } = require('../utils');
+    if (toProduto(n)) return palavra;
+
+    // Busca produto mais próximo foneticamente
+    const MAX_DIST = n.length <= 5 ? 2 : 3;
+    let melhorProduto = null;
+    let melhorDist    = Infinity;
+    let empate        = false;
+
+    for (const prod of produtos) {
+      const dist = levenshtein(n, norm(prod));
+      if (dist < melhorDist) {
+        melhorDist    = dist;
+        melhorProduto = prod;
+        empate        = false;
+      } else if (dist === melhorDist) {
+        empate = true;
+      }
+    }
+
+    if (!empate && melhorProduto && melhorDist <= MAX_DIST) {
+      console.log(`[áudio] correção fonética: "${palavra}" → "${melhorProduto}" (dist ${melhorDist})`);
+      corrigido = true;
+      return melhorProduto;
+    }
+
+    return palavra;
+  });
+
+  let textoCorrigido = resultado.join(' ');
+
+  // Se houve correção e não há número na frase, injeta "1" antes do produto
+  if (corrigido) {
+    const temNumero = /\b(\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez)\b/.test(norm(textoCorrigido));
+    if (!temNumero) {
+      // Injeta "1" antes da primeira palavra que é produto
+      const { toProduto } = require('../utils');
+      const partes = textoCorrigido.split(/\s+/);
+      const idxProd = partes.findIndex(p => toProduto(norm(p)));
+      if (idxProd > 0) {
+        partes.splice(idxProd, 0, '1');
+        textoCorrigido = partes.join(' ');
+        console.log(`[áudio] quantidade injetada: "${textoCorrigido}"`);
+      }
+    }
+  }
+
+  return textoCorrigido;
 }
 
 // ── Transcrição de áudio via Groq Whisper ────────────────────────────────────
@@ -101,6 +196,7 @@ module.exports = {
   corrigirPalavra,
   limparTranscricao,
   corrigirTranscricao,
+  corrigirFoneticosProdutos,
   dedupNomeInicio,
   transcreverAudio,
 };
