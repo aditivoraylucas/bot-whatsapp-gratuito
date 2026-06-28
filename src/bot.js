@@ -6,7 +6,7 @@ const pino = require('pino');
 const crypto = require('crypto');
 
 const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
-const { horaAtualSP, agoraData, norm } = require('./utils');
+const { horaAtualSP, agoraData, norm, toProduto, toNumero } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
 const {
   transcreverAudio,
@@ -166,11 +166,6 @@ function precisaLimparSessao(statusCode, errorMessage) {
 }
 
 // ── Pipeline de correção de áudio ─────────────────────────────────────────────────
-// Ordem:
-//  1. limparTranscricao   — remove pontuação extra e espaços
-//  2. corrigirTranscricao — dicionário de erros de voz (CORRECOES_VOZ)
-//  3. dedupNomeInicio     — remove repetição do nome no início ("Julia Julia...")
-//  4. corrigirFoneticos   — Levenshtein contra todos os sinônimos de produtos
 function aplicarPipelineAudio(textoRaw) {
   if (!textoRaw) return textoRaw;
   const p1 = limparTranscricao(textoRaw);
@@ -179,6 +174,88 @@ function aplicarPipelineAudio(textoRaw) {
   const p4 = corrigirFoneticosProdutos(p3);
   if (p4 !== p1) console.log(`[áudio] pipeline: "${textoRaw}" → "${p4}"`);
   return p4;
+}
+
+// ── Quoted reply: completa mensagem incompleta ──────────────────────────────────────
+// Analisa a mensagem citada e a resposta para montar um comando completo.
+//
+// Fluxo 1 — citada tem produto, sem quantidade:
+//   citada: "lucas trufa"  →  resposta: "2"   →  monta: "lucas trufa 2"
+//
+// Fluxo 2 — citada tem quantidade, sem produto:
+//   citada: "lucas 2"      →  resposta: "trufa" →  monta: "lucas trufa 2"
+//
+// Se não conseguir montar nada útil, retorna null (fluxo normal continua).
+function tentarCompletarViaQuoted(textoCitado, textoResposta) {
+  if (!textoCitado || !textoResposta) return null;
+
+  const citada   = textoCitado.trim();
+  const resposta = textoResposta.trim();
+  const palavrasCitada   = norm(citada).split(/\s+/).filter(Boolean);
+  const palavrasResposta = norm(resposta).split(/\s+/).filter(Boolean);
+
+  // Detecta o que há na mensagem citada
+  let temProdutoCitada   = false;
+  let temQuantidadeCitada = false;
+  for (const p of palavrasCitada) {
+    if (toProduto(p))        temProdutoCitada    = true;
+    if (toNumero(p) !== null) temQuantidadeCitada = true;
+  }
+
+  // Detecta o que há na resposta
+  let produtoResposta   = null;
+  let quantidadeResposta = null;
+  for (let i = 0; i < palavrasResposta.length; i++) {
+    if (!produtoResposta) {
+      // Tenta produto de 2 palavras primeiro
+      if (i + 1 < palavrasResposta.length) {
+        const p2 = toProduto(palavrasResposta[i] + ' ' + palavrasResposta[i + 1]);
+        if (p2) { produtoResposta = p2; i++; continue; }
+      }
+      const p1 = toProduto(palavrasResposta[i]);
+      if (p1) { produtoResposta = p1; continue; }
+    }
+    if (quantidadeResposta === null) {
+      const q = toNumero(palavrasResposta[i]);
+      if (q !== null) { quantidadeResposta = q; continue; }
+    }
+  }
+
+  // ── Fluxo 1: citada tem produto mas NÃO tem quantidade
+  //    resposta deve ser só um número (ou conter um número)
+  if (temProdutoCitada && !temQuantidadeCitada && quantidadeResposta !== null) {
+    // Remove da resposta qualquer coisa que já está na citada (evita duplicar nome)
+    // Simplesmente concatena: "citada + número"
+    const montado = `${citada} ${quantidadeResposta}`;
+    console.log(`[quoted] Fluxo1: "${citada}" + "${resposta}" → "${montado}"`);
+    return montado;
+  }
+
+  // ── Fluxo 2: citada tem quantidade mas NÃO tem produto
+  //    resposta deve conter um produto (e opcionalmente uma quantidade diferente)
+  if (!temProdutoCitada && temQuantidadeCitada && produtoResposta) {
+    // Extrai o número da citada para remontar na ordem correta: "nome qtd produto"
+    let qtdFinal = quantidadeResposta !== null ? quantidadeResposta : null;
+    if (qtdFinal === null) {
+      for (const p of palavrasCitada) {
+        const q = toNumero(p);
+        if (q !== null) { qtdFinal = q; break; }
+      }
+    }
+    // Extrai o nome (palavras antes do número na citada)
+    const nomePalavras = [];
+    for (const p of palavrasCitada) {
+      if (toNumero(p) !== null) break;
+      nomePalavras.push(p);
+    }
+    const nome = nomePalavras.join(' ');
+    if (!nome || !qtdFinal) return null;
+    const montado = `${nome} ${qtdFinal} ${produtoResposta}`;
+    console.log(`[quoted] Fluxo2: "${citada}" + "${resposta}" → "${montado}"`);
+    return montado;
+  }
+
+  return null;
 }
 
 // ── iniciarBot ───────────────────────────────────────────────────────────────────────
@@ -309,12 +386,10 @@ async function iniciarBot() {
             const textoRaw = await transcreverAudio(buffer, mimeType);
 
             if (!textoRaw) {
-              // Whisper não conseguiu transcrever — silencio, sem spam no grupo
               console.warn('[áudio] Whisper não retornou texto.');
               continue;
             }
 
-            // Pipeline completo: limpar → corrigir voz → dedup nome → fonético
             const textoCorrigido = aplicarPipelineAudio(textoRaw);
             console.log(`Transcrição: ${textoRaw}`);
 
@@ -324,7 +399,6 @@ async function iniciarBot() {
                 text: `🎤 _"${textoRaw}"_\n\n${resposta}`,
               });
             } else {
-              // Não reconhecido — mostra transcrição para a pessoa corrigir
               await sock.sendMessage(jid, {
                 text: `🎤 _"${textoRaw}"_\n\n⚠️ Não entendi esse áudio.\nTente digitar o comando ou reenvie falando mais devagar.`,
               });
@@ -338,6 +412,28 @@ async function iniciarBot() {
                      || msg.message?.extendedTextMessage?.text
                      || '';
         if (!textMsg.trim()) continue;
+
+        // ── Quoted reply: tenta completar mensagem incompleta ───────────────────
+        // Só entra se a mensagem atual é uma resposta a outra mensagem (quoted).
+        // Extrai o texto da mensagem citada e tenta montar um comando completo.
+        // Se conseguir → processa o montado. Se não → fluxo normal abaixo.
+        const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+        if (quotedMsg) {
+          const textoCitado = quotedMsg?.conversation || quotedMsg?.extendedTextMessage?.text || '';
+          if (textoCitado.trim()) {
+            const textoMontado = tentarCompletarViaQuoted(textoCitado.trim(), textMsg.trim());
+            if (textoMontado) {
+              const respostaQuoted = await processarTexto(textoMontado, jid, sock);
+              if (respostaQuoted) {
+                await sock.sendMessage(jid, { text: respostaQuoted });
+                continue; // ← não processa mais nada desta mensagem
+              }
+              // Se processarTexto não reconheceu o montado, cai no fluxo normal
+            }
+          }
+        }
+
+        // Fluxo normal (sem quoted, ou quoted não resultou em comando válido)
         const resposta = await processarTexto(textMsg, jid, sock);
         if (resposta) await sock.sendMessage(jid, { text: resposta });
 
