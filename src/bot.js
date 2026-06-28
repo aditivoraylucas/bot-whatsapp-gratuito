@@ -8,9 +8,16 @@ const crypto = require('crypto');
 const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
 const { horaAtualSP, agoraData, norm } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
-const { transcreverAudio, limparTranscricao, corrigirTranscricao, corrigirFoneticosProdutos, processarTexto } = require('./handlers');
+const {
+  transcreverAudio,
+  limparTranscricao,
+  corrigirTranscricao,
+  corrigirFoneticosProdutos,
+  dedupNomeInicio,
+  processarTexto,
+} = require('./handlers');
 
-// ── Estado compartilhado ──────────────────────────────────────────────────────
+// ── Estado compartilhado ────────────────────────────────────────────────────────────
 let botConectado          = false;
 let sockGlobal            = null;
 let jidGrupoGlobal        = null;
@@ -20,11 +27,8 @@ let ultimoDiaResumo       = '';
 let pairingPendente       = false;
 let pairingNumero         = '';
 let tentativasReconexao   = 0;
+let sessaoInvalidada      = false;
 
-// Flag que impede restaurar sessão após loggedOut — só novo pairing resolve
-let sessaoInvalidada = false;
-
-// ── Deduplicação de mensagens ─────────────────────────────────────────────────
 const mensagensProcessadas = new Set();
 const TTL_MENSAGEM_MS      = 30_000;
 
@@ -34,7 +38,7 @@ function getPairingNumero()    { return pairingNumero; }
 function setPairingPendente(v) { pairingPendente = v; }
 function setPairingNumero(v)   { pairingNumero = v; }
 
-// ── Helper: normaliza o array de env-vars da Render API ──────────────────────
+// ── Helper: normaliza env-vars da Render API ────────────────────────────────────
 function normalizarEnvVars(raw) {
   if (!Array.isArray(raw)) raw = raw?.envVars || [];
   return raw
@@ -63,7 +67,11 @@ async function putEnvVarsRender(novas) {
   if (!resPut.ok) throw new Error(`Render PUT env-vars falhou: ${resPut.status} — ${(await resPut.text()).slice(0, 300)}`);
 }
 
-// ── Limpa sessão corrompida (401 / loggedOut) ─────────────────────────────────
+// ── Sessão ────────────────────────────────────────────────────────────────────────────────
+function md5(str) {
+  return crypto.createHash('md5').update(str).digest('hex');
+}
+
 function limparSessaoLocal() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
@@ -85,14 +93,9 @@ async function limparSessaoNoRender() {
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
-// ── Fila de salvamento — evita PUT simultâneo e race condition ────────────────
-let _salvandoAgora  = false;
+let _salvandoAgora   = false;
 let _salvarNovamente = false;
-let _hashSalvo      = null;
-
-function md5(str) {
-  return crypto.createHash('md5').update(str).digest('hex');
-}
+let _hashSalvo       = null;
 
 async function salvarSessaoNoRender() {
   if (_salvandoAgora) { _salvarNovamente = true; return; }
@@ -121,7 +124,6 @@ async function salvarSessaoNoRender() {
   }
 }
 
-// ── Sessão persistente ────────────────────────────────────────────────────────
 function restaurarSessao() {
   if (sessaoInvalidada) {
     console.log('[restaurarSessao] Sessão invalidada — aguardando novo pareamento.');
@@ -136,18 +138,18 @@ function restaurarSessao() {
       const localConteudo = localExiste ? fs.readFileSync(credsPath, 'utf8') : null;
       if (!localExiste || md5(localConteudo) !== md5(credsJson)) {
         fs.writeFileSync(credsPath, credsJson, 'utf8');
-        console.log('[restaurarSessao] creds.json atualizado a partir do CREDS_JSON (env-var).');
+        console.log('[restaurarSessao] creds.json atualizado a partir do CREDS_JSON.');
       } else {
-        console.log('[restaurarSessao] creds.json local já está em sincronia com CREDS_JSON.');
+        console.log('[restaurarSessao] creds.json local já está em sincronia.');
       }
       _hashSalvo = md5(credsJson);
       return true;
     }
     if (fs.existsSync(credsPath)) {
-      console.log('[restaurarSessao] Usando creds.json local (sem CREDS_JSON na env-var).');
+      console.log('[restaurarSessao] Usando creds.json local.');
       return true;
     }
-    console.log('[restaurarSessao] Nenhuma sessão encontrada — será necessário novo pairing.');
+    console.log('[restaurarSessao] Nenhuma sessão encontrada — novo pairing necessário.');
     return false;
   } catch (e) { console.error('Erro ao restaurar sessao:', e.message); return false; }
 }
@@ -163,7 +165,23 @@ function precisaLimparSessao(statusCode, errorMessage) {
   return false;
 }
 
-// ── iniciarBot ────────────────────────────────────────────────────────────────
+// ── Pipeline de correção de áudio ─────────────────────────────────────────────────
+// Ordem:
+//  1. limparTranscricao   — remove pontuação extra e espaços
+//  2. corrigirTranscricao — dicionário de erros de voz (CORRECOES_VOZ)
+//  3. dedupNomeInicio     — remove repetição do nome no início ("Julia Julia...")
+//  4. corrigirFoneticos   — Levenshtein contra todos os sinônimos de produtos
+function aplicarPipelineAudio(textoRaw) {
+  if (!textoRaw) return textoRaw;
+  const p1 = limparTranscricao(textoRaw);
+  const p2 = corrigirTranscricao(p1);
+  const p3 = dedupNomeInicio(p2);
+  const p4 = corrigirFoneticosProdutos(p3);
+  if (p4 !== p1) console.log(`[áudio] pipeline: "${textoRaw}" → "${p4}"`);
+  return p4;
+}
+
+// ── iniciarBot ───────────────────────────────────────────────────────────────────────
 async function iniciarBot() {
   if (!sessaoInvalidada) restaurarSessao();
 
@@ -195,9 +213,7 @@ async function iniciarBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
 
-    if (update.qr) {
-      console.log('QR disponível (use o formulário web para parear por número)');
-    }
+    if (update.qr) console.log('QR disponível (use o formulário web para parear por número)');
 
     if (connection === 'open') {
       botConectado        = true;
@@ -237,12 +253,11 @@ async function iniciarBot() {
       console.log(`[conexão] Fechada — código: ${statusCode} | msg: ${errorMessage.slice(0, 80)} | limpar: ${deveLimpar}`);
 
       if (deveLimpar) {
-        console.log('[sessão] Limpando credenciais inválidas...');
         limparSessaoLocal();
         await limparSessaoNoRender();
         tentativasReconexao = 0;
         sessaoInvalidada = true;
-        console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento pelo formulário web...');
+        console.log('[sessão] ⚠️ Sessão expirada. Aguardando novo pareamento...');
         setTimeout(iniciarBot, 5000);
       } else {
         tentativasReconexao++;
@@ -257,12 +272,10 @@ async function iniciarBot() {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
+        // ── Deduplicar ──────────────────────────────────────────────────────────────
         const msgId = msg?.key?.id;
         if (msgId) {
-          if (mensagensProcessadas.has(msgId)) {
-            console.log(`[dedup] mensagem ignorada (duplicada): ${msgId}`);
-            continue;
-          }
+          if (mensagensProcessadas.has(msgId)) { console.log(`[dedup] mensagem ignorada: ${msgId}`); continue; }
           mensagensProcessadas.add(msgId);
           setTimeout(() => mensagensProcessadas.delete(msgId), TTL_MENSAGEM_MS);
         }
@@ -277,8 +290,9 @@ async function iniciarBot() {
         if (!norm(nomeGrupo).includes(norm(GRUPO_NOME))) continue;
         jidGrupoGlobal = jid;
 
-        // ── Áudio ──────────────────────────────────────────────────────────────
-        const audioMsg = msg.message?.audioMessage || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+        // ── Áudio ───────────────────────────────────────────────────────────────
+        const audioMsg = msg.message?.audioMessage
+                      || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {
           try {
             const buffer = await downloadMediaMessage(
@@ -287,44 +301,42 @@ async function iniciarBot() {
             );
 
             if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 1000) {
-              console.warn(`[áudio] Buffer inválido ou muito pequeno (${buffer?.length ?? 0} bytes) — ignorando.`);
+              console.warn(`[áudio] Buffer inválido (${buffer?.length ?? 0} bytes) — ignorando.`);
               continue;
             }
 
             const mimeType = audioMsg.mimetype || 'audio/ogg; codecs=opus';
             const textoRaw = await transcreverAudio(buffer, mimeType);
 
-            if (textoRaw) {
-              // Pipeline de correção: limpeza → correção de voz → correção fonética
-              const textoCorrigido = corrigirFoneticosProdutos(
-                corrigirTranscricao(
-                  limparTranscricao(textoRaw)
-                )
-              );
-              console.log('Transcrição:', textoRaw);
-              if (textoCorrigido !== limparTranscricao(textoRaw)) {
-                console.log('Transcrição corrigida:', textoCorrigido);
-              }
+            if (!textoRaw) {
+              // Whisper não conseguiu transcrever — silencio, sem spam no grupo
+              console.warn('[áudio] Whisper não retornou texto.');
+              continue;
+            }
 
-              const resposta = await processarTexto(textoCorrigido, jid, sock);
-              if (resposta) {
-                // Confirmação: mostra o que o bot entendeu + resultado
-                await sock.sendMessage(jid, {
-                  text: `🎤 _"${textoRaw}"_\n\n${resposta}`,
-                });
-              } else {
-                // Áudio não reconhecido — avisa para reenviar
-                await sock.sendMessage(jid, {
-                  text: `🎤 _"${textoRaw}"_\n\n⚠️ Não entendi esse áudio. Tente reenviar ou digite o comando.`,
-                });
-              }
+            // Pipeline completo: limpar → corrigir voz → dedup nome → fonético
+            const textoCorrigido = aplicarPipelineAudio(textoRaw);
+            console.log(`Transcrição: ${textoRaw}`);
+
+            const resposta = await processarTexto(textoCorrigido, jid, sock);
+            if (resposta) {
+              await sock.sendMessage(jid, {
+                text: `🎤 _"${textoRaw}"_\n\n${resposta}`,
+              });
+            } else {
+              // Não reconhecido — mostra transcrição para a pessoa corrigir
+              await sock.sendMessage(jid, {
+                text: `🎤 _"${textoRaw}"_\n\n⚠️ Não entendi esse áudio.\nTente digitar o comando ou reenvie falando mais devagar.`,
+              });
             }
           } catch (e) { console.error('Erro ao processar áudio:', e.message); }
           continue;
         }
 
         // ── Texto ───────────────────────────────────────────────────────────────
-        const textMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+        const textMsg = msg.message?.conversation
+                     || msg.message?.extendedTextMessage?.text
+                     || '';
         if (!textMsg.trim()) continue;
         const resposta = await processarTexto(textMsg, jid, sock);
         if (resposta) await sock.sendMessage(jid, { text: resposta });

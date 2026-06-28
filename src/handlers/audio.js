@@ -8,6 +8,7 @@ const { norm, PRECOS } = require('../utils');
 
 // ── Correções de transcrição de voz ──────────────────────────────────────────
 const CORRECOES_VOZ = {
+  // Comandos
   'saudo':'saldo','saud':'saldo','salvo':'saldo','salda':'saldo','saldos':'saldo',
   'relatorios':'relatorio','relato':'relatorio',
   'rezumo':'resumo','resuno':'resumo',
@@ -15,7 +16,6 @@ const CORRECOES_VOZ = {
   'cancelado':'cancelar','cancela':'cancelar','cancelas':'cancelar',
   'zera':'zerar','ajudas':'ajuda','produto':'produtos',
   'pagol':'pagou',
-  // NOTA: 'pago' NÃO é corrigido para 'pagou' — "pago no pix" é venda à vista
   'pics':'pix','pik':'pix',
   'transferio':'transferiu','transferiou':'transferiu',
   // Erros fonéticos de bombom/trufa
@@ -44,19 +44,17 @@ function corrigirTranscricao(texto) {
 
 /**
  * Remove palavras duplicadas CONSECUTIVAS no início da frase.
+ * Ex: "Julia Julia 2 trufas" → "Julia 2 trufas"
  */
 function dedupNomeInicio(texto) {
   if (!texto) return texto;
   const palavras = texto.trim().split(/\s+/);
   const n = palavras.length;
   if (n < 2) return texto;
-
   for (let bloco = Math.floor(n / 2); bloco >= 1; bloco--) {
     const parte1 = palavras.slice(0, bloco).map(norm).join(' ');
     const parte2 = palavras.slice(bloco, bloco * 2).map(norm).join(' ');
-    if (parte1 === parte2) {
-      return palavras.slice(bloco).join(' ');
-    }
+    if (parte1 === parte2) return palavras.slice(bloco).join(' ');
   }
   return texto;
 }
@@ -76,28 +74,8 @@ function levenshtein(a, b) {
 }
 
 /**
- * Todos os sinônimos de todos os produtos — usados como alvo para correção fonética.
- * Inclui os sinônimos hardcoded de utils.js para garantir que bombom/momon sejam alvos.
- */
-function getAllSinonimos() {
-  const { todosOsSinonimos } = require('../utils');
-  const mapa = todosOsSinonimos();
-  const todos = new Set();
-  for (const sins of Object.values(mapa)) {
-    for (const s of sins) todos.add(norm(s));
-  }
-  return [...todos];
-}
-
-/**
- * Corrige palavras não reconhecidas que soam parecido com produtos cadastrados.
- *
- * Melhorias v2:
- *  - Compara contra TODOS os sinônimos (não só as chaves do PRECOS)
- *    → "momon" bate em "bombom" (dist 3 em 6 letras) e é corrigido para o produto
- *  - Distância máxima: comprimento_palavra * 0.5, mínimo 2, máximo 4
- *    → Permite pegar variações fonéticas mais distantes em palavras longas
- *  - Em caso de empate de distância, mantém a palavra original
+ * Corrige palavras não reconhecidas foneticaménte contra todos os sinônimos.
+ * Distância máxima dinâmica: 50% do tamanho da palavra, entre 2 e 4.
  */
 const PALAVRAS_RESERVADAS_AUDIO = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
@@ -114,7 +92,7 @@ function corrigirFoneticosProdutos(texto) {
   const produtos = Object.keys(PRECOS);
   if (!produtos.length) return texto;
 
-  // Constrói mapa: sinonimo_normalizado → produto
+  // Mapa sinônimo normalizado → produto
   const mapaAlvo = {};
   for (const [prod, sins] of Object.entries(todosOsSinonimos())) {
     for (const sin of sins) mapaAlvo[norm(sin)] = prod;
@@ -126,12 +104,10 @@ function corrigirFoneticosProdutos(texto) {
 
   const resultado = palavras.map(palavra => {
     const n = norm(palavra);
-
     if (PALAVRAS_RESERVADAS_AUDIO.has(n)) return palavra;
-    if (/^\d+([,.]\d+)?$/.test(n)) return palavra;
-    if (toProduto(n)) return palavra; // já reconhecido
+    if (/^\d+([,.]\d+)?$/.test(n))        return palavra;
+    if (toProduto(n))                      return palavra; // já reconhecido
 
-    // Distância máxima dinâmica: 50% do comprimento, entre 2 e 4
     const MAX_DIST = Math.min(4, Math.max(2, Math.floor(n.length * 0.5)));
     let melhorSin  = null;
     let melhorDist = Infinity;
@@ -139,13 +115,8 @@ function corrigirFoneticosProdutos(texto) {
 
     for (const sin of sinonimosList) {
       const dist = levenshtein(n, sin);
-      if (dist < melhorDist) {
-        melhorDist = dist;
-        melhorSin  = sin;
-        empate     = false;
-      } else if (dist === melhorDist) {
-        empate = true;
-      }
+      if (dist < melhorDist) { melhorDist = dist; melhorSin = sin; empate = false; }
+      else if (dist === melhorDist)         { empate = true; }
     }
 
     if (!empate && melhorSin && melhorDist <= MAX_DIST) {
@@ -154,12 +125,12 @@ function corrigirFoneticosProdutos(texto) {
       corrigido = true;
       return prodAlvo;
     }
-
     return palavra;
   });
 
   let textoCorrigido = resultado.join(' ');
 
+  // Se houve correção e não há número, injeta "1" antes do produto
   if (corrigido) {
     const temNumero = /\b(\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez)\b/.test(norm(textoCorrigido));
     if (!temNumero) {
@@ -177,36 +148,110 @@ function corrigirFoneticosProdutos(texto) {
 }
 
 // ── Transcrição de áudio via Groq Whisper ────────────────────────────────────
+
+/**
+ * Gera o prompt do Whisper dinamicamente.
+ *
+ * Estratégia:
+ * - O Whisper usa o prompt como "contexto de estilo" — ele tenta continuar
+ *   o texto do prompt. Por isso o prompt deve TERMINAR com exemplos no
+ *   mesmo formato exato que as mensagens chegam.
+ * - Incluir os produtos com seus sinônimos reais ajuda o modelo a
+ *   reconhecer as palavras corretamente.
+ * - Incluir nomes reais dos clientes (lidos da planilha) reduz erros
+ *   em nomes incomuns.
+ */
+function gerarPromptWhisper() {
+  const { todosOsSinonimos } = require('../utils');
+  const sins = todosOsSinonimos();
+
+  // Monta lista de produtos com seus sinônimos para o prompt
+  const listaProdutos = Object.entries(sins)
+    .map(([prod, lista]) => {
+      const unicos = [...new Set(lista.map(s => s.toLowerCase()))].slice(0, 6);
+      return unicos.join(', ');
+    })
+    .join('; ');
+
+  return [
+    // Contexto geral
+    'Contexto: sistema de registro de vendas de doces no atacado.',
+    'As mensagens são comandos de voz curtos em português brasileiro informal.',
+    '',
+    // Formato esperado (o mais importante — Whisper tenta "continuar" esse estilo)
+    'Formato: [Nome do cliente] [quantidade] [produto]',
+    'Exemplos reais de comandos:',
+    'Carla 2 bombons.',
+    'Jéssica 1 trufa.',
+    'Elayne 4 trufas.',
+    'Maria Clara 2 bombons.',
+    'Lucas 3 trufas.',
+    'Ana pagou 15.',
+    'Pedro pix 20.',
+    'Carla 1 bolo.',
+    '',
+    // Produtos cadastrados com sinônimos
+    `Produtos cadastrados: ${listaProdutos}.`,
+    '',
+    // Instruções
+    'IMPORTANTE: transcreva exatamente o que foi dito, mesmo que pareça errado.',
+    'Não corrija nomes de pessoas.',
+    'Não adicione pontuação extra.',
+    'Se não entender uma palavra, escreva o som mais próximo.',
+  ].join(' ');
+}
+
 async function transcreverAudio(audioBuffer, mimeType) {
   if (!GROQ_API_KEY) return null;
   try {
     const fetch = (await import('node-fetch')).default;
-    const ext   = mimeType?.includes('ogg') ? 'ogg' : mimeType?.includes('mp4') ? 'mp4' : 'ogg';
+    const ext   = mimeType?.includes('ogg') ? 'ogg'
+                : mimeType?.includes('mp4') ? 'mp4'
+                : mimeType?.includes('webm') ? 'webm'
+                : 'ogg';
     const form  = new FormData();
-    form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg' });
+    form.append('file', audioBuffer, { filename: `audio.${ext}`, contentType: mimeType || 'audio/ogg; codecs=opus' });
     form.append('model', 'whisper-large-v3-turbo');
     form.append('language', 'pt');
-    form.append('response_format', 'json');
-    const promptWhisper = [
-      'Contexto: sistema de vendas de doces. Formato das mensagens: nome de cliente seguido de quantidade e produto.',
-      'Nomes próprios brasileiros comuns: Ana, Carlos, Julia, Maria, Pedro, Lucas, Rodrigo, Raissa, Fernanda, Gabriel, Beatriz, Rafaela.',
-      'Produtos: trufa, trufas, bolo, bolos, bombom, bombons.',
-      'Exemplos exatos de entradas válidas:',
-      '"Rodrigo 1 bolo", "Ana 3 trufas", "Carlos 2 bolos", "Julia 1 bombom",',
-      '"Maria pagou 10", "Pedro pix 15", "Joao pagou 2 trufas",',
-      '"Raissa 1 bolo", "Rodrigo 2 trufas pago pix", "Ana pegou 1 bolo e pagou dinheiro".',
-      'IMPORTANTE: se não entender uma palavra, transcreva o som mais próximo. Não invente frases como "o que é" ou "não sei".',
-    ].join(' ');
-    form.append('prompt', promptWhisper);
+    form.append('response_format', 'verbose_json'); // mais detalhes no retorno
+    form.append('temperature', '0');               // temperatura 0 = mais determinístico
+    form.append('prompt', gerarPromptWhisper());
+
     const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
       body: form,
     });
-    if (!res.ok) { const err = await res.text(); console.error('Groq erro:', err); return null; }
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error('Groq erro:', err);
+      return null;
+    }
+
     const data = await res.json();
-    return data.text?.trim() || null;
-  } catch (e) { console.error('Erro transcrição Groq:', e.message); return null; }
+
+    // verbose_json retorna { text, segments, ... }
+    const textoRaw = data.text?.trim() || null;
+    if (!textoRaw) return null;
+
+    // Log de confiança se disponível
+    if (data.segments?.length) {
+      const avgLogprob = data.segments.reduce((s, seg) => s + (seg.avg_logprob || 0), 0) / data.segments.length;
+      const noSpeech   = data.segments.some(seg => (seg.no_speech_prob || 0) > 0.6);
+      console.log(`[áudio] avg_logprob=${avgLogprob.toFixed(3)} no_speech=${noSpeech}`);
+      // Se alta probabilidade de silêncio, descarta
+      if (noSpeech && textoRaw.length < 10) {
+        console.warn('[áudio] áudio descartado: prob de silêncio alta');
+        return null;
+      }
+    }
+
+    return textoRaw;
+  } catch (e) {
+    console.error('Erro transcrição Groq:', e.message);
+    return null;
+  }
 }
 
 module.exports = {
