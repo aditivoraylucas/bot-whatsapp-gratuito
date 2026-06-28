@@ -1,4 +1,4 @@
-// ─── HANDLERS DE MENSAGENS ────────────────────────────────────────────
+// ─── HANDLERS DE MENSAGENS ─────────────────────────────────────────
 const { LIMITE_CREDITO_PADRAO } = require('./config');
 const {
   norm, capitalizarNome, isMes,
@@ -29,7 +29,27 @@ const {
   criarConfirmacaoProduto, criarConfirmacaoQuantidade,
 } = require('./handlers/session');
 
-// ── Monta menu numerado de produtos cadastrados ───────────────────────────────
+// ── Helper: formata a resposta de uma compra registrada (Opção B) ─────────────────
+// Exibe compra atual E saldo acumulado do produto.
+// Se a compra atual = saldo total (1ª compra), não repete a linha de saldo.
+function formatarRespostaCompra(res, produto) {
+  const emoji    = emojiProduto(produto);
+  const nomeProd = nomeProdutoExib(produto);
+  const ehPrimeira = res.qtdNova === res.qtdAcumulada;
+
+  const linhaCompra = `${emoji} *${res.cliente}*: ${res.qtdNova} ${nomeProd}(s) = R$ ${res.valorNovo.toFixed(2)}`;
+
+  if (ehPrimeira) {
+    // 1ª compra: só mostra a linha da compra (não faz sentido repetir o saldo)
+    return linhaCompra;
+  }
+
+  // Compra adicional: mostra compra atual + saldo total
+  const linhaSaldo = `📊 Saldo *${res.cliente}*: ${res.qtdAcumulada} ${nomeProd}(s) • R$ ${res.totalAcumulado.toFixed(2)}`;
+  return `${linhaCompra}\n${linhaSaldo}`;
+}
+
+// ── Monta menu numerado de produtos cadastrados ─────────────────────────────────
 function menuProdutos() {
   const produtos = Object.keys(PRECOS);
   return produtos.map((p, i) => `${i + 1}️⃣ ${nomeProdutoExib(p)}`).join('\n');
@@ -39,11 +59,10 @@ function produtoPorIndice(resposta) {
   const produtos = Object.keys(PRECOS);
   const idx = parseInt(norm(resposta)) - 1;
   if (!isNaN(idx) && idx >= 0 && idx < produtos.length) return produtos[idx];
-  // também aceita o nome direto
   return toProduto(norm(resposta)) || null;
 }
 
-// ── Parser de compra ─────────────────────────────────────────────────────
+// ── Parser de compra ──────────────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -82,30 +101,24 @@ function parsearLinha(linha) {
   return { nome: capitalizarNome(nomeRaw), itens };
 }
 
-// ── Detecta compra com produto mas sem quantidade ─────────────────────────────
-// Retorna { nome, produto } se encontrar "[nome] [produto]" sem número, ou null.
 function parsearCompraSemQuantidade(texto) {
-  const limpa      = norm(texto).replace(/,/g,' ').replace(/\s+/g,' ').trim();
-  const palavras   = limpa.split(' ').filter(Boolean);
-  const n          = palavras.length;
+  const limpa    = norm(texto).replace(/,/g,' ').replace(/\s+/g,' ').trim();
+  const palavras = limpa.split(' ').filter(Boolean);
+  const n        = palavras.length;
   if (n < 2) return null;
-
-  // Procura produto em qualquer posição que não seja a primeira
   for (let i = 1; i < n; i++) {
     const p1 = toProduto(palavras[i]);
     if (p1) {
-      const nomeRaw = palavras.slice(0, i).join(' ');
+      const nomeRaw   = palavras.slice(0, i).join(' ');
       if (PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
-      // Não deve ter número antes do produto
       const temNumero = palavras.slice(0, i).some(p => toNumero(p) !== null);
       if (temNumero) return null;
       return { nome: capitalizarNome(nomeRaw), produto: p1 };
     }
-    // produto de duas palavras
     if (i + 1 < n) {
       const p2 = toProduto(palavras[i] + ' ' + palavras[i+1]);
       if (p2) {
-        const nomeRaw = palavras.slice(0, i).join(' ');
+        const nomeRaw   = palavras.slice(0, i).join(' ');
         if (PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
         const temNumero = palavras.slice(0, i).some(p => toNumero(p) !== null);
         if (temNumero) return null;
@@ -212,51 +225,44 @@ function parsearPagamento(linha) {
   return null;
 }
 
-// ── Processador principal de texto ───────────────────────────────────────
+// ── Processador principal de texto ─────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
   if (!texto) return null;
   const t        = norm(texto);
   const palavras = t.split(/\s+/).filter(Boolean);
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // ── Fluxo de confirmação pendente (produto ou quantidade) ─────────────────
-  // ══════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
+  // ── Fluxo de confirmação pendente ──────────────────────────────────────────────
   const confirmacao = CONFIRMACAO_PENDENTE[jid];
   if (confirmacao) {
     if (Date.now() > confirmacao.expira) {
       limparConfirmacao(jid);
-      // deixa cair para o processamento normal
     } else if (confirmacao.etapa === 'produto') {
-      // Usuário está escolhendo o produto
       const prodEscolhido = produtoPorIndice(texto.trim());
       if (!prodEscolhido) {
-        // Resposta inválida — repete o menu
         return `❓ Não entendi. Escolha o produto de *${confirmacao.nome}*:\n${menuProdutos()}\n\nResponda com o número ou o nome do produto.`;
       }
-      // Produto escolhido — avança para etapa de quantidade
       criarConfirmacaoQuantidade(jid, confirmacao.nome, prodEscolhido);
       return `Quantos *${nomeProdutoExib(prodEscolhido).toLowerCase()}s* *${confirmacao.nome}* levou?\n\n1️⃣  1\n2️⃣  2\n3️⃣  3\n4️⃣  4\n5️⃣  5\n🔢  Outro — digite o número`;
     } else if (confirmacao.etapa === 'quantidade') {
-      // Usuário está informando a quantidade
       const qtd = toNumero(texto.trim()) || parseInt(norm(texto.trim()));
       if (!qtd || qtd <= 0 || isNaN(qtd)) {
         return `❓ Não entendi a quantidade. Quantos *${nomeProdutoExib(confirmacao.produto).toLowerCase()}s* *${confirmacao.nome}* levou?\n\nDigite apenas o número (ex: *2*)`;
       }
       limparConfirmacao(jid);
-      // Registra a compra
       const res = await registrarOuAcumular(confirmacao.nome, confirmacao.produto, qtd);
       if (!res) return `❌ Erro ao registrar ${confirmacao.nome}.`;
       if (res.limiteBloqueado) {
         return `⛔ *${res.cliente}* atingiu o limite de crédito!\nAtual: R$ ${res.totalAtual.toFixed(2)} + R$ ${res.valorNovo.toFixed(2)} = ultrapassaria R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}`;
       }
-      pushLancamento(jid, { tipo: 'compra', cliente: res.cliente, produto: confirmacao.produto, quantidade: qtd, valor: PRECOS[confirmacao.produto] * qtd });
-      return `${emojiProduto(confirmacao.produto)} *${res.cliente}*: ${res.qtdAcumulada} ${nomeProdutoExib(confirmacao.produto)}(s) = R$ ${res.totalAcumulado.toFixed(2)}`;
+      pushLancamento(jid, { tipo: 'compra', cliente: res.cliente, produto: confirmacao.produto, quantidade: qtd, valor: res.valorNovo });
+      return formatarRespostaCompra(res, confirmacao.produto);
     }
   }
 
-  // ── Confirmação de zerar pendente ─────────────────────────────────────────
-  if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
+  // ── Confirmação de zerar pendente ─────────────────────────────────────────────
+if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     const { cliente, expira } = ZERAR_PENDENTE[jid];
     delete ZERAR_PENDENTE[jid];
     if (Date.now() > expira) return `⏱️ Tempo expirado. Digite novamente _zerar ${cliente}_ para tentar de novo.`;
@@ -266,8 +272,8 @@ async function processarTexto(texto, jid, sock) {
     delete ZERAR_PENDENTE[jid];
   }
 
-  // ── renomear ─────────────────────────────────────────────────────────────
-  if (p0 === 'renomear') {
+  // ── renomear ──────────────────────────────────────────────────────────────────────
+if (p0 === 'renomear') {
     const textoResto = texto.trim().slice('renomear'.length).trim();
     const sep = textoResto.includes('>') ? '>' : textoResto.includes(' para ') ? ' para ' : null;
     if (!sep) return '❌ Uso: _renomear [nome antigo] > [nome novo]_\nExemplo: _renomear Lucas com K > Lucas_';
@@ -278,7 +284,7 @@ async function processarTexto(texto, jid, sock) {
     return await renomearCliente(nomeAntigo, nomeNovo);
   }
 
-  // ── relatorio ─────────────────────────────────────────────────────────────
+  // ── relatorio ───────────────────────────────────────────────────────────────────
   if (p0 === 'relatorio' || p0 === 'relatorios') {
     if (p1 === 'hoje')                         return await gerarRelatorioPeriodo('hoje');
     if (p1 === 'semana')                       return await gerarRelatorioPeriodo('semana');
@@ -296,15 +302,15 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'ajuda' || p0 === 'help') return mensagemAjuda();
   if (p0 === 'produtos')             return listarProdutos();
 
-  // ── Zerar com confirmação ─────────────────────────────────────────────────
-  if (p0 === 'zerar' && p1) {
+  // ── Zerar com confirmação ───────────────────────────────────────────────────────────
+if (p0 === 'zerar' && p1) {
     const nomeCliente = palavras.slice(1).join(' ');
     ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
     setTimeout(() => { if (ZERAR_PENDENTE[jid]?.cliente === nomeCliente) delete ZERAR_PENDENTE[jid]; }, ZERAR_TTL_MS + 1000);
     return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
   }
 
-  // ── Aliases ───────────────────────────────────────────────────────────────
+  // ── Aliases ───────────────────────────────────────────────────────────────────────
   if (p0 === 'aliases') {
     const entradas = Object.entries(ALIASES);
     if (!entradas.length) return '📋 Nenhum apelido cadastrado ainda.\n_Use: alias [apelido] [nome completo]_';
@@ -340,8 +346,8 @@ async function processarTexto(texto, jid, sock) {
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
-  // ── Expandir alias ────────────────────────────────────────────────────────
-  let textoResolvido = texto;
+  // ── Expandir alias ─────────────────────────────────────────────────────────────────────
+let textoResolvido = texto;
   {
     const primeiraOriginal = texto.trim().split(/\s+/)[0];
     const aliasResolvido   = resolverAlias(primeiraOriginal);
@@ -350,7 +356,7 @@ async function processarTexto(texto, jid, sock) {
     }
   }
 
-  // ── Venda à vista ─────────────────────────────────────────────────────────
+  // ── Venda à vista ───────────────────────────────────────────────────────────────────
   const vista = parsearVendaVista(textoResolvido);
   if (vista) {
     const msgs = [];
@@ -371,6 +377,7 @@ async function processarTexto(texto, jid, sock) {
     if (pag.tipo === 'valor')   { const r = await processarPagamentoValor(pag.nome, pag.valor, jid, pag.metodo); return r.msg; }
   }
 
+  // ── Compra fiado (parser principal) ────────────────────────────────────────────────
   const compra = parsearLinha(textoResolvido);
   if (compra) {
     const msgs = [];
@@ -381,31 +388,24 @@ async function processarTexto(texto, jid, sock) {
         msgs.push(`⛔ *${res.cliente}* atingiu o limite de crédito!\nAtual: R$ ${res.totalAtual.toFixed(2)} + R$ ${res.valorNovo.toFixed(2)} = ultrapassaria R$ ${LIMITE_CREDITO_PADRAO.toFixed(2)}`);
         continue;
       }
-      pushLancamento(jid, { tipo: 'compra', cliente: res.cliente, produto: item.produto, quantidade: item.quantidade, valor: PRECOS[item.produto] * item.quantidade });
-      msgs.push(`${emojiProduto(item.produto)} *${res.cliente}*: ${res.qtdAcumulada} ${nomeProdutoExib(item.produto)}(s) = R$ ${res.totalAcumulado.toFixed(2)}`);
+      pushLancamento(jid, { tipo: 'compra', cliente: res.cliente, produto: item.produto, quantidade: item.quantidade, valor: res.valorNovo });
+      msgs.push(formatarRespostaCompra(res, item.produto));
     }
     return msgs.join('\n');
   }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // ── Fallback: produto sem quantidade ou produto não reconhecido ───────────
-  // ══════════════════════════════════════════════════════════════════════════
-
-  // Caso 1: nome + produto reconhecido mas sem número → pergunta quantidade
+  // ── Fallback: produto sem quantidade ───────────────────────────────────────────────────
   const semQtd = parsearCompraSemQuantidade(textoResolvido);
   if (semQtd) {
     criarConfirmacaoQuantidade(jid, semQtd.nome, semQtd.produto);
     return `Quantos *${nomeProdutoExib(semQtd.produto).toLowerCase()}s* *${semQtd.nome}* levou?\n\n1️⃣  1\n2️⃣  2\n3️⃣  3\n4️⃣  4\n5️⃣  5\n🔢  Outro — digite o número`;
   }
 
-  // Caso 2: parece ter nome mas produto irreconhecível → pergunta produto
-  // Heurística: 2+ palavras, primeira parece nome próprio (capitalizada ou sem acento),
-  // não é comando conhecido, não foi parseado por nenhum parser acima.
+  // Caso 2: parece nome + produto não reconhecido → pergunta produto
   const palavrasOrig = texto.trim().split(/\s+/).filter(Boolean);
   if (palavrasOrig.length >= 2 && !PALAVRAS_RESERVADAS.has(p0)) {
     const primeiraParece = /^[A-ZÀ-Ú]/.test(palavrasOrig[0]) || palavrasOrig[0].length >= 3;
     if (primeiraParece) {
-      // Verifica se nenhuma palavra é produto — se fossem, parsearLinha já teria pego
       const algumProduto = palavrasOrig.some(p => toProduto(norm(p)));
       if (!algumProduto) {
         const nomeGuess = capitalizarNome(palavrasOrig[0]);

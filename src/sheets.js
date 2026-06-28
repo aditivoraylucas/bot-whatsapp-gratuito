@@ -1,4 +1,4 @@
-// ─── GOOGLE SHEETS — lógica de negócio ────────────────────────────────────────────
+// ─── GOOGLE SHEETS — lógica de negócio ─────────────────────────────────────────────
 const { LIMITE_CREDITO_PADRAO } = require('./config');
 const {
   comRetry, norm, capitalizarNome, mesmoNome, resolverNome,
@@ -12,6 +12,11 @@ const {
   getRows, appendRow, updateRow, deleteRows,
 } = require('./sheets/core');
 
+// Retorna:
+//   { cliente, qtdNova, valorNovo, qtdAcumulada, totalAcumulado }
+// onde:
+//   qtdNova / valorNovo  = o que acabou de ser registrado (compra atual)
+//   qtdAcumulada / totalAcumulado = saldo total do produto após o lançamento
 async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
   try {
     const meta      = await getSheetsMeta();
@@ -40,11 +45,11 @@ async function registrarOuAcumular(clienteEnviado, produto, quantidade) {
         ...existente, Quantidade: qtdAcumulada, Total: totalAcumulado.toFixed(2), UltimaCompra: agora(),
       });
       await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2), Metodo: '' });
-      return { cliente, totalAcumulado, qtdAcumulada };
+      return { cliente, qtdNova: quantidade, valorNovo, qtdAcumulada, totalAcumulado };
     } else {
       await appendRow('Saldo', HDR_SALDO, { Cliente: cliente, Produto: produto, Quantidade: quantidade, Total: valorNovo.toFixed(2), UltimaCompra: agora() });
       await appendRow('Historico', HDR_HIST, { Data: agora(), Cliente: cliente, Tipo: 'Compra', Produto: produto, Quantidade: quantidade, Valor: valorNovo.toFixed(2), Metodo: '' });
-      return { cliente, totalAcumulado: valorNovo, qtdAcumulada: quantidade };
+      return { cliente, qtdNova: quantidade, valorNovo, qtdAcumulada: quantidade, totalAcumulado: valorNovo };
     }
   } catch (err) { console.error('Erro planilha:', err.message); return null; }
 }
@@ -247,7 +252,6 @@ async function zerarCliente(nomeDigitado) {
   } catch (err) { console.error('Erro zerar:', err.message); return '❌ Erro ao zerar cliente.'; }
 }
 
-// ── Renomear cliente (corrige nome errado em Saldo e Histórico) ────────────────
 async function renomearCliente(nomeAntigo, nomeNovo) {
   try {
     const meta      = await getSheetsMeta();
@@ -258,18 +262,16 @@ async function renomearCliente(nomeAntigo, nomeNovo) {
     const nomesConhecidos = [...new Set(rowsSaldo.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon = resolverNome(nomeAntigo, nomesConhecidos);
     if (!nomeCanon) {
-      // tenta no histórico também
       const rowsHist = await getRows('Historico', HDR_HIST);
       const nomesHist = [...new Set(rowsHist.map(r => r.Cliente.trim()).filter(Boolean))];
       const canonHist = resolverNome(nomeAntigo, nomesHist);
       if (!canonHist) return `❌ Cliente *${capitalizarNome(nomeAntigo)}* não encontrado.`;
     }
 
-    const nomeCanonFinal = nomeCanon || capitalizarNome(nomeAntigo);
+    const nomeCanonFinal    = nomeCanon || capitalizarNome(nomeAntigo);
     const novoNomeFormatado = capitalizarNome(nomeNovo);
     let alteracoesSaldo = 0, alteracoesHist = 0;
 
-    // Atualiza aba Saldo
     const rowsSaldoAtual = await getRows('Saldo', HDR_SALDO);
     for (const row of rowsSaldoAtual) {
       if (row.Cliente.trim() === nomeCanonFinal) {
@@ -278,7 +280,6 @@ async function renomearCliente(nomeAntigo, nomeNovo) {
       }
     }
 
-    // Atualiza aba Historico
     const rowsHistAtual = await getRows('Historico', HDR_HIST);
     for (const row of rowsHistAtual) {
       if (row.Cliente.trim() === nomeCanonFinal) {
@@ -294,7 +295,6 @@ async function renomearCliente(nomeAntigo, nomeNovo) {
   } catch (err) { console.error('Erro renomear:', err.message); return '❌ Erro ao renomear cliente.'; }
 }
 
-// ── Relatórios (delegados para sheetsReports.js) ─────────────────────────────
 const { createSheetsReports } = require('./sheetsReports');
 const _reports = createSheetsReports({ getRows, HDR_SALDO, HDR_HIST });
 
