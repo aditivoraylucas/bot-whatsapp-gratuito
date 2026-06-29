@@ -1,4 +1,4 @@
-// ─── MÓDULO DE ÁUDIO ─────────────────────────────────────────────────────────
+// ─── MÓDULO DE ÁUDIO ─────────────────────────────────────────────────────────────────────
 // Responsabilidade: transcrição via Groq Whisper e limpeza/correção de texto
 // transcrito. Sem dependência de fluxo de negócio ou comandos do bot.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6,7 +6,7 @@ const FormData = require('form-data');
 const { GROQ_API_KEY } = require('../config');
 const { norm, PRECOS } = require('../utils');
 
-// ── Correções de transcrição de voz ──────────────────────────────────────────
+// ── Correções de transcrição de voz ────────────────────────────────────────────
 const CORRECOES_VOZ = {
   // Comandos
   'saudo':'saldo','saud':'saldo','salvo':'saldo','salda':'saldo','saldos':'saldo',
@@ -76,6 +76,10 @@ function levenshtein(a, b) {
 /**
  * Corrige palavras não reconhecidas foneticaménte contra todos os sinônimos.
  * Distância máxima dinâmica: 50% do tamanho da palavra, entre 2 e 4.
+ *
+ * REGRA IMPORTANTE: palavras com inicial maiúscula são tratadas como nomes
+ * próprios (clientes) e nunca são substituídas por produtos.
+ * Ex: "Bruna" não pode virar "trufa" mesmo com distância 2.
  */
 const PALAVRAS_RESERVADAS_AUDIO = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
@@ -107,6 +111,9 @@ function corrigirFoneticosProdutos(texto) {
     if (PALAVRAS_RESERVADAS_AUDIO.has(n)) return palavra;
     if (/^\d+([,.]\d+)?$/.test(n))        return palavra;
     if (toProduto(n))                      return palavra; // já reconhecido
+
+    // Palavras com inicial maiúscula são nomes próprios (clientes) — nunca substituir
+    if (/^[A-ZÀ-Ú]/.test(palavra))        return palavra;
 
     const MAX_DIST = Math.min(4, Math.max(2, Math.floor(n.length * 0.5)));
     let melhorSin  = null;
@@ -147,7 +154,7 @@ function corrigirFoneticosProdutos(texto) {
   return textoCorrigido;
 }
 
-// ── Transcrição de áudio via Groq Whisper ────────────────────────────────────
+// ── Transcrição de áudio via Groq Whisper ───────────────────────────────────────────
 
 /**
  * Gera o prompt do Whisper dinamicamente.
