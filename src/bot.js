@@ -93,20 +93,54 @@ async function limparSessaoNoRender() {
   } catch (e) { console.error('[sessão] Erro ao limpar CREDS_JSON no Render:', e.message); }
 }
 
-let _salvandoAgora   = false;
-let _salvarNovamente = false;
-let _hashSalvo       = null;
+let _hashSalvo        = null;
+let _timerRender      = null;
+const DEBOUNCE_RENDER = 5 * 60 * 1000; // 5 minutos
 
+// Salva imediatamente no disco. Agenda envio para a Render API com debounce de 5 min.
+// Isso evita dezenas de chamadas à Render API por hora, prevenindo restarts desnecessários.
 async function salvarSessaoNoRender() {
-  if (_salvandoAgora) { _salvarNovamente = true; return; }
-  _salvandoAgora = true;
+  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+  const credsPath = path.join(AUTH_DIR, 'creds.json');
+  if (!fs.existsSync(credsPath)) return;
+
+  const conteudo = fs.readFileSync(credsPath, 'utf8');
+  const hash     = md5(conteudo);
+
+  // Sem mudança real → não faz nada
+  if (hash === _hashSalvo) return;
+  _hashSalvo = hash;
+
+  // Cancela envio anterior pendente e agenda novo daqui a 5 min
+  if (_timerRender) clearTimeout(_timerRender);
+  _timerRender = setTimeout(async () => {
+    _timerRender = null;
+    try {
+      const existente = await buscarEnvVarsRender();
+      const novas = [
+        ...existente.filter(v => v.key !== 'CREDS_JSON'),
+        { key: 'CREDS_JSON', value: conteudo },
+      ];
+      await putEnvVarsRender(novas);
+      process.env.CREDS_JSON = conteudo;
+      console.log('[sessão] CREDS_JSON atualizado na Render API.');
+    } catch (e) {
+      console.error('[sessão] Erro ao salvar sessao:', e.message);
+    }
+  }, DEBOUNCE_RENDER);
+}
+
+// Força envio imediato para a Render API (usado ao conectar e ao desconectar)
+async function salvarSessaoNoRenderImediato() {
+  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+  const credsPath = path.join(AUTH_DIR, 'creds.json');
+  if (!fs.existsSync(credsPath)) return;
+
+  if (_timerRender) { clearTimeout(_timerRender); _timerRender = null; }
+
   try {
-    if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
-    const credsPath = path.join(AUTH_DIR, 'creds.json');
-    if (!fs.existsSync(credsPath)) return;
-    const conteudo = fs.readFileSync(credsPath, 'utf8');
-    const hash     = md5(conteudo);
-    if (hash === _hashSalvo) return;
+    const conteudo  = fs.readFileSync(credsPath, 'utf8');
+    const hash      = md5(conteudo);
     const existente = await buscarEnvVarsRender();
     const novas = [
       ...existente.filter(v => v.key !== 'CREDS_JSON'),
@@ -115,12 +149,9 @@ async function salvarSessaoNoRender() {
     await putEnvVarsRender(novas);
     process.env.CREDS_JSON = conteudo;
     _hashSalvo = hash;
-    console.log('[sessão] CREDS_JSON atualizado na Render API.');
+    console.log('[sessão] CREDS_JSON atualizado na Render API (imediato).');
   } catch (e) {
-    console.error('[sessão] Erro ao salvar sessao:', e.message);
-  } finally {
-    _salvandoAgora = false;
-    if (_salvarNovamente) { _salvarNovamente = false; salvarSessaoNoRender(); }
+    console.error('[sessão] Erro ao salvar sessao (imediato):', e.message);
   }
 }
 
@@ -177,15 +208,6 @@ function aplicarPipelineAudio(textoRaw) {
 }
 
 // ── Quoted reply: completa mensagem incompleta ──────────────────────────────────────
-// Analisa a mensagem citada e a resposta para montar um comando completo.
-//
-// Fluxo 1 — citada tem produto, sem quantidade:
-//   citada: "lucas trufa"  →  resposta: "2"   →  monta: "lucas trufa 2"
-//
-// Fluxo 2 — citada tem quantidade, sem produto:
-//   citada: "lucas 2"      →  resposta: "trufa" →  monta: "lucas trufa 2"
-//
-// Se não conseguir montar nada útil, retorna null (fluxo normal continua).
 function tentarCompletarViaQuoted(textoCitado, textoResposta) {
   if (!textoCitado || !textoResposta) return null;
 
@@ -194,7 +216,6 @@ function tentarCompletarViaQuoted(textoCitado, textoResposta) {
   const palavrasCitada   = norm(citada).split(/\s+/).filter(Boolean);
   const palavrasResposta = norm(resposta).split(/\s+/).filter(Boolean);
 
-  // Detecta o que há na mensagem citada
   let temProdutoCitada   = false;
   let temQuantidadeCitada = false;
   for (const p of palavrasCitada) {
@@ -202,12 +223,10 @@ function tentarCompletarViaQuoted(textoCitado, textoResposta) {
     if (toNumero(p) !== null) temQuantidadeCitada = true;
   }
 
-  // Detecta o que há na resposta
   let produtoResposta   = null;
   let quantidadeResposta = null;
   for (let i = 0; i < palavrasResposta.length; i++) {
     if (!produtoResposta) {
-      // Tenta produto de 2 palavras primeiro
       if (i + 1 < palavrasResposta.length) {
         const p2 = toProduto(palavrasResposta[i] + ' ' + palavrasResposta[i + 1]);
         if (p2) { produtoResposta = p2; i++; continue; }
@@ -221,20 +240,13 @@ function tentarCompletarViaQuoted(textoCitado, textoResposta) {
     }
   }
 
-  // ── Fluxo 1: citada tem produto mas NÃO tem quantidade
-  //    resposta deve ser só um número (ou conter um número)
   if (temProdutoCitada && !temQuantidadeCitada && quantidadeResposta !== null) {
-    // Remove da resposta qualquer coisa que já está na citada (evita duplicar nome)
-    // Simplesmente concatena: "citada + número"
     const montado = `${citada} ${quantidadeResposta}`;
     console.log(`[quoted] Fluxo1: "${citada}" + "${resposta}" → "${montado}"`);
     return montado;
   }
 
-  // ── Fluxo 2: citada tem quantidade mas NÃO tem produto
-  //    resposta deve conter um produto (e opcionalmente uma quantidade diferente)
   if (!temProdutoCitada && temQuantidadeCitada && produtoResposta) {
-    // Extrai o número da citada para remontar na ordem correta: "nome qtd produto"
     let qtdFinal = quantidadeResposta !== null ? quantidadeResposta : null;
     if (qtdFinal === null) {
       for (const p of palavrasCitada) {
@@ -242,7 +254,6 @@ function tentarCompletarViaQuoted(textoCitado, textoResposta) {
         if (q !== null) { qtdFinal = q; break; }
       }
     }
-    // Extrai o nome (palavras antes do número na citada)
     const nomePalavras = [];
     for (const p of palavrasCitada) {
       if (toNumero(p) !== null) break;
@@ -282,6 +293,7 @@ async function iniciarBot() {
 
   sockGlobal = sock;
 
+  // Salva no disco imediatamente; envia para Render API com debounce de 5 min
   sock.ev.on('creds.update', async () => {
     await saveCreds();
     await salvarSessaoNoRender();
@@ -298,7 +310,8 @@ async function iniciarBot() {
       sessaoInvalidada    = false;
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
-      await salvarSessaoNoRender();
+      // Força envio imediato ao conectar para garantir sessão salva
+      await salvarSessaoNoRenderImediato();
 
       if (!agendamentosIniciados) {
         agendamentosIniciados = true;
@@ -413,10 +426,7 @@ async function iniciarBot() {
                      || '';
         if (!textMsg.trim()) continue;
 
-        // ── Quoted reply: tenta completar mensagem incompleta ───────────────────
-        // Só entra se a mensagem atual é uma resposta a outra mensagem (quoted).
-        // Extrai o texto da mensagem citada e tenta montar um comando completo.
-        // Se conseguir → processa o montado. Se não → fluxo normal abaixo.
+        // ── Quoted reply ────────────────────────────────────────────────────────
         const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
         if (quotedMsg) {
           const textoCitado = quotedMsg?.conversation || quotedMsg?.extendedTextMessage?.text || '';
@@ -426,14 +436,13 @@ async function iniciarBot() {
               const respostaQuoted = await processarTexto(textoMontado, jid, sock);
               if (respostaQuoted) {
                 await sock.sendMessage(jid, { text: respostaQuoted });
-                continue; // ← não processa mais nada desta mensagem
+                continue;
               }
-              // Se processarTexto não reconheceu o montado, cai no fluxo normal
             }
           }
         }
 
-        // Fluxo normal (sem quoted, ou quoted não resultou em comando válido)
+        // Fluxo normal
         const resposta = await processarTexto(textMsg, jid, sock);
         if (resposta) await sock.sendMessage(jid, { text: resposta });
 
