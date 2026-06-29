@@ -1,4 +1,4 @@
-// ─── HANDLERS DE MENSAGENS ─────────────────────────────────────────
+// ─── HANDLERS DE MENSAGENS ───────────────────────────────────────────────────────
 const { LIMITE_CREDITO_PADRAO } = require('./config');
 const {
   norm, capitalizarNome, isMes,
@@ -30,8 +30,6 @@ const {
 } = require('./handlers/session');
 
 // ── Helper: formata a resposta de uma compra registrada (Opção B) ─────────────────
-// Exibe compra atual E saldo acumulado do produto.
-// Se a compra atual = saldo total (1ª compra), não repete a linha de saldo.
 function formatarRespostaCompra(res, produto) {
   const emoji    = emojiProduto(produto);
   const nomeProd = nomeProdutoExib(produto);
@@ -40,16 +38,14 @@ function formatarRespostaCompra(res, produto) {
   const linhaCompra = `${emoji} *${res.cliente}*: ${res.qtdNova} ${nomeProd}(s) = R$ ${res.valorNovo.toFixed(2)}`;
 
   if (ehPrimeira) {
-    // 1ª compra: só mostra a linha da compra (não faz sentido repetir o saldo)
     return linhaCompra;
   }
 
-  // Compra adicional: mostra compra atual + saldo total
   const linhaSaldo = `📊 Saldo *${res.cliente}*: ${res.qtdAcumulada} ${nomeProd}(s) • R$ ${res.totalAcumulado.toFixed(2)}`;
   return `${linhaCompra}\n${linhaSaldo}`;
 }
 
-// ── Monta menu numerado de produtos cadastrados ─────────────────────────────────
+// ── Monta menu numerado de produtos cadastrados ────────────────────────────────
 function menuProdutos() {
   const produtos = Object.keys(PRECOS);
   return produtos.map((p, i) => `${i + 1}️⃣ ${nomeProdutoExib(p)}`).join('\n');
@@ -62,7 +58,7 @@ function produtoPorIndice(resposta) {
   return toProduto(norm(resposta)) || null;
 }
 
-// ── Parser de compra ──────────────────────────────────────────────────────────
+// ── Parser de compra ─────────────────────────────────────────────────────────────
 const PALAVRAS_RESERVADAS = new Set([
   'pagou','pix','transferiu','depositou','mandou','enviou',
   'cancelar','saldo','historico','relatorio','resumo',
@@ -189,20 +185,85 @@ function parsearVendaVista(linha) {
   return { ...resultado, itens: itensAgrupados, metodo };
 }
 
+// ── Normaliza variações de frases de pagamento em linguagem natural ─────────────────
+// Substitui expressões como "acabou de pagar", "acaba de pagar",
+// "ja pagou", "ja pago", "já quitou" etc. pela palavra-chave "pagou",
+// para que parsearPagamento consiga extrair nome + valor/produto normalmente.
+// Também normaliza "quitou" e "liquidou" como sinônimos de pagamento.
+//
+// Exemplos:
+//   "Rodrigo acabou de pagar as 4 trufas 20 reais no pix"  →  "Rodrigo pagou as 4 trufas 20 reais no pix"
+//   "Rodrigo ja quitou 20 reais"                           →  "Rodrigo pagou 20 reais"
+//   "Rodrigo liquidou a divida de 20"                      →  "Rodrigo pagou 20"
+function normalizarFrasePagamento(linha) {
+  let t = norm(linha);
+
+  // Ordem importa: frases mais longas primeiro para evitar match parcial
+  const substituicoes = [
+    // "acabou de pagar" / "acaba de pagar" / "acabei de pagar"
+    /\b(acabou|acaba|acabei)\s+de\s+pagar\b/g,
+    // "já pagou" / "ja pagou" / "ja pago" / "já pago"
+    /\bja\s+(pagou|pago)\b/g,
+    // "quitou" / "quitei" / "quitamos"
+    /\b(quitou|quitei|quitamos|quitaram)\b/g,
+    // "liquidou" / "liquidei"
+    /\b(liquidou|liquidei)\b/g,
+    // "efetuou pagamento" / "fez o pagamento" / "realizou pagamento"
+    /\b(efetuou|fez|realizou)\s+(o\s+)?pagamento\b/g,
+    // "me pagou" / "nos pagou" (mantém o nome antes, remove "me"/"nos")
+    /\b(me|nos)\s+pagou\b/g,
+  ];
+
+  t = t.replace(substituicoes[0], 'pagou');
+  t = t.replace(substituicoes[1], 'pagou');
+  t = t.replace(substituicoes[2], 'pagou');
+  t = t.replace(substituicoes[3], 'pagou');
+  t = t.replace(substituicoes[4], 'pagou');
+  t = t.replace(substituicoes[5], 'pagou'); // "me pagou" / "nos pagou" → "pagou"
+
+  // Remove ruídos comuns que não agregam informação ao parser
+  // "as", "os", "a", "o", "meu", "minha", "da", "do", "no", "na", "pelo", "pela", "de"
+  // (só removemos após normalizar o verbo, para não cortar partes do nome)
+  t = t.replace(/\b(as|os|a divida|a conta|tudo|total|referente|referentes|valor|reais?|r\$|meu|minha|no|na|pelo|pela)\b/g, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+
+  return t;
+}
+
 function parsearPagamento(linha) {
   const tNorm = norm(linha);
-  if (!/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm)) return null;
-  const kwMatch = tNorm.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);
+
+  // Verifica se a linha tem qualquer indício de pagamento (gatilhos diretos
+  // ou variações em linguagem natural)
+  const temGatilhoDireto = /\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/.test(tNorm);
+  const temGatilhoNatural = /\b(acabou|acaba|acabei)\s+de\s+pagar\b/.test(tNorm)
+    || /\bja\s+(pagou|pago)\b/.test(tNorm)
+    || /\b(quitou|quitei|quitamos|quitaram|liquidou|liquidei)\b/.test(tNorm)
+    || /\b(efetuou|fez|realizou)\s+(o\s+)?pagamento\b/.test(tNorm)
+    || /\b(me|nos)\s+pagou\b/.test(tNorm);
+
+  if (!temGatilhoDireto && !temGatilhoNatural) return null;
+
+  // Se veio via linguagem natural, normaliza para o formato padrão
+  // (ex: "Rodrigo acabou de pagar as 4 trufas" → "Rodrigo pagou 4 trufas")
+  const linhaProcessada = temGatilhoNatural && !temGatilhoDireto
+    ? normalizarFrasePagamento(tNorm)
+    : tNorm;
+
+  // Daqui pra baixo, é o parser original — sem alterações
+  const kwMatch = linhaProcessada.match(/\b(pagou|pix|transferiu|depositou|mandou|enviou)\b/);
   if (!kwMatch) return null;
   const keyword      = kwMatch[1];
-  const palavrasNorm = tNorm.split(/\s+/).filter(Boolean);
-  const palavrasOrig = linha.trim().split(/\s+/).filter(Boolean);
+  const palavrasNorm = linhaProcessada.split(/\s+/).filter(Boolean);
+  // Para extrair o nome original, usamos o texto normalizado (já em minúsculas)
+  // mas capitalizamos depois com capitalizarNome
+  const palavrasOrig = linhaProcessada.split(/\s+/).filter(Boolean);
   let kwIdx = -1;
   for (let i = 0; i < palavrasNorm.length; i++) { if (palavrasNorm[i] === keyword) { kwIdx = i; break; } }
   if (kwIdx <= 0) return null;
   const nomeRaw = palavrasOrig.slice(0, kwIdx).join(' ').trim();
   if (!nomeRaw) return null;
-  const metodo = extrairMetodo(linha);
+  const metodo = extrairMetodo(linha); // usa a linha original para detectar método
   const resto = palavrasNorm.slice(kwIdx + 1).join(' ').trim();
   if (resto) {
     const partesResto = resto.split(/\s+/).filter(Boolean);
@@ -220,19 +281,19 @@ function parsearPagamento(linha) {
     }
     if (prod && qtd) return { tipo: 'produto', nome: nomeRaw, quantidade: qtd, produto: prod, metodo };
   }
-  const valor = extrairValor(resto || linha);
+  const valor = extrairValor(resto || linhaProcessada);
   if (valor && valor > 0) return { tipo: 'valor', nome: nomeRaw, valor, metodo };
   return null;
 }
 
-// ── Processador principal de texto ─────────────────────────────────────────
+// ── Processador principal de texto ───────────────────────────────────────────────
 async function processarTexto(texto, jid, sock) {
   if (!texto) return null;
   const t        = norm(texto);
   const palavras = t.split(/\s+/).filter(Boolean);
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
-  // ════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════
   // ── Fluxo de confirmação pendente ──────────────────────────────────────────────
   const confirmacao = CONFIRMACAO_PENDENTE[jid];
   if (confirmacao) {
@@ -272,7 +333,7 @@ if (ZERAR_PENDENTE[jid] && (p0 === 'sim' || p0 === 's')) {
     delete ZERAR_PENDENTE[jid];
   }
 
-  // ── renomear ──────────────────────────────────────────────────────────────────────
+  // ── renomear ────────────────────────────────────────────────────────────────────────────────
 if (p0 === 'renomear') {
     const textoResto = texto.trim().slice('renomear'.length).trim();
     const sep = textoResto.includes('>') ? '>' : textoResto.includes(' para ') ? ' para ' : null;
@@ -284,7 +345,7 @@ if (p0 === 'renomear') {
     return await renomearCliente(nomeAntigo, nomeNovo);
   }
 
-  // ── relatorio ───────────────────────────────────────────────────────────────────
+  // ── relatorio ───────────────────────────────────────────────────────────────────────
   if (p0 === 'relatorio' || p0 === 'relatorios') {
     if (p1 === 'hoje')                         return await gerarRelatorioPeriodo('hoje');
     if (p1 === 'semana')                       return await gerarRelatorioPeriodo('semana');
@@ -302,7 +363,7 @@ if (p0 === 'renomear') {
   if (p0 === 'ajuda' || p0 === 'help') return mensagemAjuda();
   if (p0 === 'produtos')             return listarProdutos();
 
-  // ── Zerar com confirmação ───────────────────────────────────────────────────────────
+  // ── Zerar com confirmação ─────────────────────────────────────────────────────────────
 if (p0 === 'zerar' && p1) {
     const nomeCliente = palavras.slice(1).join(' ');
     ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
@@ -310,7 +371,7 @@ if (p0 === 'zerar' && p1) {
     return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
   }
 
-  // ── Aliases ───────────────────────────────────────────────────────────────────────
+  // ── Aliases ──────────────────────────────────────────────────────────────────────────────
   if (p0 === 'aliases') {
     const entradas = Object.entries(ALIASES);
     if (!entradas.length) return '📋 Nenhum apelido cadastrado ainda.\n_Use: alias [apelido] [nome completo]_';
@@ -346,7 +407,7 @@ if (p0 === 'zerar' && p1) {
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
-  // ── Expandir alias ─────────────────────────────────────────────────────────────────────
+  // ── Expandir alias ─────────────────────────────────────────────────────────────────────────────
 let textoResolvido = texto;
   {
     const primeiraOriginal = texto.trim().split(/\s+/)[0];
@@ -356,7 +417,7 @@ let textoResolvido = texto;
     }
   }
 
-  // ── Venda à vista ───────────────────────────────────────────────────────────────────
+  // ── Venda à vista ─────────────────────────────────────────────────────────────────────
   const vista = parsearVendaVista(textoResolvido);
   if (vista) {
     const msgs = [];
@@ -377,7 +438,7 @@ let textoResolvido = texto;
     if (pag.tipo === 'valor')   { const r = await processarPagamentoValor(pag.nome, pag.valor, jid, pag.metodo); return r.msg; }
   }
 
-  // ── Compra fiado (parser principal) ────────────────────────────────────────────────
+  // ── Compra fiado (parser principal) ────────────────────────────────────────────────────
   const compra = parsearLinha(textoResolvido);
   if (compra) {
     const msgs = [];
@@ -394,7 +455,7 @@ let textoResolvido = texto;
     return msgs.join('\n');
   }
 
-  // ── Fallback: produto sem quantidade ───────────────────────────────────────────────────
+  // ── Fallback: produto sem quantidade ──────────────────────────────────────────────────────
   const semQtd = parsearCompraSemQuantidade(textoResolvido);
   if (semQtd) {
     criarConfirmacaoQuantidade(jid, semQtd.nome, semQtd.produto);
