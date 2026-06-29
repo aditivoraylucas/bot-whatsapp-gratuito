@@ -98,7 +98,6 @@ let _timerRender      = null;
 const DEBOUNCE_RENDER = 5 * 60 * 1000; // 5 minutos
 
 // Salva imediatamente no disco. Agenda envio para a Render API com debounce de 5 min.
-// Isso evita dezenas de chamadas à Render API por hora, prevenindo restarts desnecessários.
 async function salvarSessaoNoRender() {
   if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
   const credsPath = path.join(AUTH_DIR, 'creds.json');
@@ -107,11 +106,9 @@ async function salvarSessaoNoRender() {
   const conteudo = fs.readFileSync(credsPath, 'utf8');
   const hash     = md5(conteudo);
 
-  // Sem mudança real → não faz nada
   if (hash === _hashSalvo) return;
   _hashSalvo = hash;
 
-  // Cancela envio anterior pendente e agenda novo daqui a 5 min
   if (_timerRender) clearTimeout(_timerRender);
   _timerRender = setTimeout(async () => {
     _timerRender = null;
@@ -130,7 +127,6 @@ async function salvarSessaoNoRender() {
   }, DEBOUNCE_RENDER);
 }
 
-// Força envio imediato para a Render API (usado ao conectar e ao desconectar)
 async function salvarSessaoNoRenderImediato() {
   if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
   const credsPath = path.join(AUTH_DIR, 'creds.json');
@@ -205,6 +201,26 @@ function aplicarPipelineAudio(textoRaw) {
   const p4 = corrigirFoneticosProdutos(p3);
   if (p4 !== p1) console.log(`[áudio] pipeline: "${textoRaw}" → "${p4}"`);
   return p4;
+}
+
+// ── Download de áudio com retry ────────────────────────────────────────────────────
+// Tenta baixar o buffer 2 vezes com 2s de espera entre tentativas.
+// Retorna o buffer ou null se ambas falharem.
+async function downloadAudioComRetry(msg, sock, logger, tentativas = 2, espera = 2000) {
+  for (let i = 1; i <= tentativas; i++) {
+    try {
+      const buffer = await downloadMediaMessage(
+        msg, 'buffer', {},
+        { logger, reuploadRequest: sock.updateMediaMessage }
+      );
+      if (buffer && Buffer.isBuffer(buffer) && buffer.length >= 1000) return buffer;
+      console.warn(`[áudio] Tentativa ${i}/${tentativas}: buffer inválido (${buffer?.length ?? 0} bytes).`);
+    } catch (e) {
+      console.warn(`[áudio] Tentativa ${i}/${tentativas}: erro no download — ${e.message}`);
+    }
+    if (i < tentativas) await new Promise(r => setTimeout(r, espera));
+  }
+  return null;
 }
 
 // ── Quoted reply: completa mensagem incompleta ──────────────────────────────────────
@@ -293,7 +309,6 @@ async function iniciarBot() {
 
   sockGlobal = sock;
 
-  // Salva no disco imediatamente; envia para Render API com debounce de 5 min
   sock.ev.on('creds.update', async () => {
     await saveCreds();
     await salvarSessaoNoRender();
@@ -310,7 +325,6 @@ async function iniciarBot() {
       sessaoInvalidada    = false;
       tentativasReconexao = 0;
       console.log('✅ Bot conectado ao WhatsApp!');
-      // Força envio imediato ao conectar para garantir sessão salva
       await salvarSessaoNoRenderImediato();
 
       if (!agendamentosIniciados) {
@@ -385,13 +399,13 @@ async function iniciarBot() {
                       || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {
           try {
-            const buffer = await downloadMediaMessage(
-              msg, 'buffer', {},
-              { logger, reuploadRequest: sock.updateMediaMessage }
-            );
+            const buffer = await downloadAudioComRetry(msg, sock, logger);
 
-            if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 1000) {
-              console.warn(`[áudio] Buffer inválido (${buffer?.length ?? 0} bytes) — ignorando.`);
+            if (!buffer) {
+              console.error('[áudio] Falha no download após todas as tentativas.');
+              await sock.sendMessage(jid, {
+                text: '⚠️ Não consegui processar esse áudio. Por favor, reenvie.',
+              });
               continue;
             }
 
