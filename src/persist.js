@@ -1,21 +1,22 @@
 // ─── PERSISTÊNCIA VIA RENDER API ──────────────────────────────────────────────────
-// Salva e carrega PRECOS, ALIASES e SINONIMOS_EXTRA como env-vars no Render.
-// Isso garante que dados cadastrados via comando (novo, preco, alias) sobrevivam
-// a deploys e reinicializacões do servidor.
+// Salva e carrega PRECOS, ALIASES, SINONIMOS_EXTRA e DEDUP_IDS como env-vars no Render.
 //
 // Chaves usadas na Render API:
-//   BOT_PRECOS       → JSON com { trufa: 5, bolo: 12, brigadeiro: 3.5, ... }
-//   BOT_ALIASES      → JSON com { ray: "Raylucas", ju: "Julia Souza", ... }
+//   BOT_PRECOS       → JSON com { trufa: 5, bolo: 12, ... }
+//   BOT_ALIASES      → JSON com { ray: "Raylucas", ... }
 //   BOT_SINONIMOS    → JSON com { brigadeiro: ["brigadeiro","brigue"], ... }
+//   BOT_DEDUP_IDS    → JSON com [ ["ID", timestamp], ... ] — últimas 2h
 // ─────────────────────────────────────────────────────────────────────────────
 const { RENDER_API_KEY, RENDER_SERVICE_ID } = require('./config');
 
-// Chaves que este módulo gerencia na Render API
 const CHAVE_PRECOS    = 'BOT_PRECOS';
 const CHAVE_ALIASES   = 'BOT_ALIASES';
 const CHAVE_SINONIMOS = 'BOT_SINONIMOS';
+const CHAVE_DEDUP     = 'BOT_DEDUP_IDS';
 
-// ── Helpers HTTP (mesmo padrão de bot.js) ────────────────────────────────────
+const DEDUP_TTL_MS = 2 * 60 * 60 * 1000; // 2 horas
+
+// ── Helpers HTTP ─────────────────────────────────────────────────────────────
 
 function normalizarEnvVars(raw) {
   if (!Array.isArray(raw)) raw = raw?.envVars || [];
@@ -54,7 +55,6 @@ async function putEnvVars(lista) {
 async function salvarChave(chave, valor) {
   try {
     const novoValor = JSON.stringify(valor);
-    // Evita chamada à API se o valor já está atualizado na memória de processo
     if (process.env[chave] === novoValor) return;
     const existente = await buscarEnvVars();
     const novas = [
@@ -62,14 +62,14 @@ async function salvarChave(chave, valor) {
       { key: chave, value: novoValor },
     ];
     await putEnvVars(novas);
-    process.env[chave] = novoValor; // cacheia para evitar chamadas repetidas
+    process.env[chave] = novoValor;
     console.log(`[persist] ${chave} salvo na Render API.`);
   } catch (err) {
     console.error(`[persist] Erro ao salvar ${chave}:`, err.message);
   }
 }
 
-// ── Carregar uma chave (env-var já injetada pelo Render ou via process.env) ──
+// ── Carregar uma chave ────────────────────────────────────────────────────────
 
 function carregarChave(chave, padrao) {
   try {
@@ -81,7 +81,52 @@ function carregarChave(chave, padrao) {
   }
 }
 
-// ── API pública ───────────────────────────────────────────────────────────────────────
+// ── Dedup persistente ─────────────────────────────────────────────────────────
+// Armazena pares [id, timestamp] das últimas 2h.
+// Ao carregar, descarta entradas expiradas automaticamente.
+
+let _dedupCache = null;        // Map<id, timestamp> em memória
+let _dedupTimer = null;        // debounce para salvar
+const DEDUP_DEBOUNCE_MS = 10_000; // salva no máx a cada 10s
+
+function _carregarDedupCache() {
+  if (_dedupCache) return _dedupCache;
+  const agora = Date.now();
+  const raw   = carregarChave(CHAVE_DEDUP, []);
+  _dedupCache = new Map();
+  for (const [id, ts] of raw) {
+    if (agora - ts < DEDUP_TTL_MS) _dedupCache.set(id, ts);
+  }
+  console.log(`[persist] dedup: ${_dedupCache.size} IDs carregados.`);
+  return _dedupCache;
+}
+
+function _agendarSalvarDedup() {
+  if (_dedupTimer) return;
+  _dedupTimer = setTimeout(async () => {
+    _dedupTimer = null;
+    const agora   = Date.now();
+    const cache   = _carregarDedupCache();
+    // Limpa expirados antes de salvar
+    for (const [id, ts] of cache) {
+      if (agora - ts >= DEDUP_TTL_MS) cache.delete(id);
+    }
+    await salvarChave(CHAVE_DEDUP, [...cache.entries()]);
+  }, DEDUP_DEBOUNCE_MS);
+}
+
+function dedupVerificar(id) {
+  const cache = _carregarDedupCache();
+  return cache.has(id);
+}
+
+function dedupRegistrar(id) {
+  const cache = _carregarDedupCache();
+  cache.set(id, Date.now());
+  _agendarSalvarDedup();
+}
+
+// ── API pública ───────────────────────────────────────────────────────────────
 
 const persist = {
   // Precos
@@ -95,6 +140,10 @@ const persist = {
   // Sinonimos extras
   carregarSinonimos: (padrao) => carregarChave(CHAVE_SINONIMOS, padrao),
   salvarSinonimos:   (obj)    => salvarChave(CHAVE_SINONIMOS, obj),
+
+  // Dedup persistente
+  dedupVerificar,
+  dedupRegistrar,
 };
 
 module.exports = persist;

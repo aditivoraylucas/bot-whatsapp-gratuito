@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { AUTH_DIR, RENDER_API_KEY, RENDER_SERVICE_ID, GRUPO_NOME, HORA_LEMBRETE, HORA_RESUMO } = require('./config');
 const { horaAtualSP, agoraData, norm, toProduto, toNumero } = require('./utils');
 const { verificarLembretes, gerarResumoDiario } = require('./sheets');
+const persist = require('./persist');
 const {
   transcreverAudio,
   limparTranscricao,
@@ -30,6 +31,7 @@ let tentativasReconexao   = 0;
 let sessaoInvalidada      = false;
 let tsConectadoEm         = 0; // timestamp (s) da última conexão bem-sucedida
 
+// Dedup in-memory (complementa o dedup persistente)
 const mensagensProcessadas = new Set();
 const TTL_MENSAGEM_MS      = 5 * 60 * 1000;
 
@@ -283,6 +285,19 @@ function tentarCompletarViaQuoted(textoCitado, textoResposta) {
   return null;
 }
 
+// ── Dedup unificado (in-memory + persistente) ─────────────────────────────────
+function dedupJaProcessou(msgId) {
+  if (mensagensProcessadas.has(msgId)) return true;
+  if (persist.dedupVerificar(msgId))   return true;
+  return false;
+}
+
+function dedupMarcar(msgId) {
+  mensagensProcessadas.add(msgId);
+  setTimeout(() => mensagensProcessadas.delete(msgId), TTL_MENSAGEM_MS);
+  persist.dedupRegistrar(msgId);
+}
+
 // ── iniciarBot ───────────────────────────────────────────────────────────────────────
 async function iniciarBot() {
   if (!sessaoInvalidada) restaurarSessao();
@@ -376,25 +391,29 @@ async function iniciarBot() {
     for (const msg of messages) {
       try {
         // ── Filtro de idade ──────────────────────────────────────────────────────
-        // Nos primeiros 3min após conexão aceita mensagens de até 5min atrás
-        // (cobre o tempo de deploy). Depois disso, só mensagens de até 60s.
+        // Durante os primeiros 5 min após conexão (sync inicial): aceita TUDO.
+        // O dedup por ID (in-memory + persistente) evita reprocessamentos.
+        // Após os 5 min: só aceita mensagens de até 90s (latência normal).
         const msgTimestamp = msg?.messageTimestamp;
         if (msgTimestamp) {
-          const agora       = Math.floor(Date.now() / 1000);
-          const idadeSec    = agora - Number(msgTimestamp);
-          const limiteIdade = (agora - tsConectadoEm) < 180 ? 300 : 60;
+          const agora        = Math.floor(Date.now() / 1000);
+          const idadeSec     = agora - Number(msgTimestamp);
+          const emSyncInicial = (agora - tsConectadoEm) < 300; // 5 min de graça
+          const limiteIdade  = emSyncInicial ? Infinity : 90;
           if (idadeSec > limiteIdade) {
             console.log(`[dedup] mensagem antiga ignorada (${idadeSec}s): ${msg?.key?.id}`);
             continue;
           }
         }
 
-        // ── Deduplicar por ID ──────────────────────────────────────────────────────
+        // ── Dedup unificado (in-memory + persistente) ──────────────────────────
         const msgId = msg?.key?.id;
         if (msgId) {
-          if (mensagensProcessadas.has(msgId)) { console.log(`[dedup] mensagem ignorada: ${msgId}`); continue; }
-          mensagensProcessadas.add(msgId);
-          setTimeout(() => mensagensProcessadas.delete(msgId), TTL_MENSAGEM_MS);
+          if (dedupJaProcessou(msgId)) {
+            console.log(`[dedup] mensagem ignorada: ${msgId}`);
+            continue;
+          }
+          dedupMarcar(msgId);
         }
 
         if (msg.key.fromMe) continue;
@@ -408,7 +427,6 @@ async function iniciarBot() {
         jidGrupoGlobal = jid;
 
         // ── Áudio ───────────────────────────────────────────────────────────────
-        // Processa áudio direto OU áudio citado (reenvio/correção de registro).
         const audioMsg = msg.message?.audioMessage
                       || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {
