@@ -175,7 +175,7 @@ async function processarPagamentoValor(clienteEnviado, valorPago, jid, metodo) {
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon   = resolverNome(clienteEnviado, nomesConhecidos);
     const rowsCliente = nomeCanon
-      ? rows.filter(r => r.Cliente === nomeCanon)
+      ? rows.filter(r => mesmoNome(r.Cliente, nomeCanon))
       : rows.filter(r => mesmoNome(r.Cliente, clienteEnviado));
     if (!rowsCliente.length) return { ok: false, msg: `❌ Nenhuma dívida encontrada para *${capitalizarNome(clienteEnviado)}*.` };
     const cliente     = rowsCliente[0].Cliente;
@@ -243,7 +243,7 @@ async function zerarCliente(nomeDigitado) {
     const nomesConhecidos = [...new Set(rows.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon = resolverNome(nomeDigitado, nomesConhecidos);
     if (!nomeCanon) return `❌ Cliente *${capitalizarNome(nomeDigitado)}* não encontrado.`;
-    const rowsCliente = rows.filter(r => r.Cliente === nomeCanon);
+    const rowsCliente = rows.filter(r => mesmoNome(r.Cliente, nomeCanon));
     if (!rowsCliente.length) return `✅ *${nomeCanon}* já está sem dívidas.`;
     const totalZerado = rowsCliente.reduce((s, r) => s + parseFloat(r.Total || '0'), 0);
     await deleteRows(saldoId, rowsCliente.map(r => r._rowIndex));
@@ -261,8 +261,9 @@ async function renomearCliente(nomeAntigo, nomeNovo) {
     const rowsSaldo = await getRows('Saldo', HDR_SALDO);
     const nomesConhecidos = [...new Set(rowsSaldo.map(r => r.Cliente.trim()).filter(Boolean))];
     const nomeCanon = resolverNome(nomeAntigo, nomesConhecidos);
+
     if (!nomeCanon) {
-      const rowsHist = await getRows('Historico', HDR_HIST);
+      const rowsHist  = await getRows('Historico', HDR_HIST);
       const nomesHist = [...new Set(rowsHist.map(r => r.Cliente.trim()).filter(Boolean))];
       const canonHist = resolverNome(nomeAntigo, nomesHist);
       if (!canonHist) return `❌ Cliente *${capitalizarNome(nomeAntigo)}* não encontrado.`;
@@ -274,7 +275,8 @@ async function renomearCliente(nomeAntigo, nomeNovo) {
 
     const rowsSaldoAtual = await getRows('Saldo', HDR_SALDO);
     for (const row of rowsSaldoAtual) {
-      if (row.Cliente.trim() === nomeCanonFinal) {
+      // ✅ usa mesmoNome() — ignora maiúsculas/minúsculas/acentos
+      if (mesmoNome(row.Cliente, nomeCanonFinal)) {
         await updateRow('Saldo', HDR_SALDO, row._rowIndex, { ...row, Cliente: novoNomeFormatado });
         alteracoesSaldo++;
       }
@@ -282,7 +284,8 @@ async function renomearCliente(nomeAntigo, nomeNovo) {
 
     const rowsHistAtual = await getRows('Historico', HDR_HIST);
     for (const row of rowsHistAtual) {
-      if (row.Cliente.trim() === nomeCanonFinal) {
+      // ✅ usa mesmoNome() — ignora maiúsculas/minúsculas/acentos
+      if (mesmoNome(row.Cliente, nomeCanonFinal)) {
         await updateRow('Historico', HDR_HIST, row._rowIndex, { ...row, Cliente: novoNomeFormatado });
         alteracoesHist++;
       }
