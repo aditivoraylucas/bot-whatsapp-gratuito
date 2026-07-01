@@ -30,7 +30,8 @@ let tentativasReconexao   = 0;
 let sessaoInvalidada      = false;
 
 const mensagensProcessadas = new Set();
-const TTL_MENSAGEM_MS      = 30_000;
+const TTL_MENSAGEM_MS      = 5 * 60 * 1000; // 5 minutos
+const IDADE_MAXIMA_MS      = 60 * 1000;      // mensagens com mais de 60s são histórico
 
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
@@ -204,8 +205,6 @@ function aplicarPipelineAudio(textoRaw) {
 }
 
 // ── Download de áudio com retry ────────────────────────────────────────────────────
-// Tenta baixar o buffer 2 vezes com 2s de espera entre tentativas.
-// Retorna o buffer ou null se ambas falharem.
 async function downloadAudioComRetry(msg, sock, logger, tentativas = 2, espera = 2000) {
   for (let i = 1; i <= tentativas; i++) {
     try {
@@ -376,7 +375,17 @@ async function iniciarBot() {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
-        // ── Deduplicar ──────────────────────────────────────────────────────────────
+        // ── Filtro de idade: descarta mensagens com mais de 60s (histórico do Baileys) ──
+        const msgTimestamp = msg?.messageTimestamp;
+        if (msgTimestamp) {
+          const idadeSec = Math.floor(Date.now() / 1000) - Number(msgTimestamp);
+          if (idadeSec > 60) {
+            console.log(`[dedup] mensagem antiga ignorada (${idadeSec}s): ${msg?.key?.id}`);
+            continue;
+          }
+        }
+
+        // ── Deduplicar por ID ──────────────────────────────────────────────────────
         const msgId = msg?.key?.id;
         if (msgId) {
           if (mensagensProcessadas.has(msgId)) { console.log(`[dedup] mensagem ignorada: ${msgId}`); continue; }
