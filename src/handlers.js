@@ -310,8 +310,8 @@ async function processarTexto(texto, jid, sock) {
     const sep = textoResto.includes('>') ? '>' : textoResto.includes(' para ') ? ' para ' : null;
     if (!sep) return '❌ Uso: _renomear [nome antigo] > [nome novo]_\nExemplo: _renomear Lucas com K > Lucas_';
     const partes = textoResto.split(sep);
-    const nomeAntigo = partes[0].trim();
-    const nomeNovo   = partes.slice(1).join(sep).trim();
+    const nomeAntigo = limparNomeInicial(partes[0].trim());
+    const nomeNovo   = limparNomeInicial(partes.slice(1).join(sep).trim());
     if (!nomeAntigo || !nomeNovo) return '❌ Informe o nome antigo e o novo.\nExemplo: _renomear Lucas com K > Lucas_';
     return await renomearCliente(nomeAntigo, nomeNovo);
   }
@@ -334,7 +334,7 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'produtos')             return listarProdutos();
 
   if (p0 === 'zerar' && p1) {
-    const nomeCliente = palavras.slice(1).join(' ');
+    const nomeCliente = limparNomeInicial(palavras.slice(1).join(' '));
     ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
     setTimeout(() => { if (ZERAR_PENDENTE[jid]?.cliente === nomeCliente) delete ZERAR_PENDENTE[jid]; }, ZERAR_TTL_MS + 1000);
     return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
