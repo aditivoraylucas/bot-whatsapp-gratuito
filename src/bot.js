@@ -41,8 +41,8 @@ function setPairingNumero(v)   { pairingNumero = v; }
 
 // ── Helper: normaliza env-vars da Render API ────────────────────────────────────
 function normalizarEnvVars(raw) {
-  if (!Array.isArray(raw)) raw = raw?.envVars || [];
-  return raw
+  const lista = Array.isArray(raw) ? raw : [];
+  return lista
     .map(item => item.envVar ? { key: item.envVar.key, value: item.envVar.value } : { key: item.key, value: item.value })
     .filter(v => v.key && v.key.trim() !== '');
 }
@@ -199,7 +199,7 @@ function aplicarPipelineAudio(textoRaw) {
   const p2 = corrigirTranscricao(p1);
   const p3 = dedupNomeInicio(p2);
   const p4 = corrigirFoneticosProdutos(p3);
-  if (p4 !== p1) console.log(`[áudio] pipeline: "${textoRaw}" → "${p4}"`);
+  if (p4 !== textoRaw) console.log(`[áudio] pipeline: "${textoRaw}" → "${p4}"`);
   return p4;
 }
 
@@ -408,6 +408,7 @@ async function iniciarBot() {
         jidGrupoGlobal = jid;
 
         // ── Áudio ───────────────────────────────────────────────────────────────
+        // Processa áudio direto OU áudio citado (reenvio/correção de registro).
         const audioMsg = msg.message?.audioMessage
                       || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         if (audioMsg) {

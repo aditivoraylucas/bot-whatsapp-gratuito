@@ -3,7 +3,7 @@ const fs   = require('fs');
 const path = require('path');
 const persist = require('./persist');
 
-// ── Normalização de texto ───────────────────────────────────────────────────────────────────
+// ── Normalização de texto ───────────────────────────────────────────────────────
 function norm(t) {
   return (t || '')
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
@@ -18,7 +18,6 @@ function capitalizarNome(n) {
   return n.trim().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 }
 
-function agora() { return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function agoraData() { return new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function soData(str) { if (!str) return ''; return (str.trim().split(' ')[0] || str.trim()).replace(',', ''); }
 
@@ -27,7 +26,7 @@ function horaAtualSP() {
   return parseInt(formatter.format(new Date()));
 }
 
-// ── Levenshtein / fuzzy nome ──────────────────────────────────────────────────────────────────
+// ── Levenshtein / fuzzy nome ────────────────────────────────────────────────────
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) => [i]);
@@ -59,7 +58,7 @@ function resolverNome(digitado, nomesConhecidos) {
 
 function mesmoNome(a, b) { return norm(a) === norm(b) || nomesFuzzyIguais(a, b); }
 
-// ── Retry com backoff ───────────────────────────────────────────────────────────────────
+// ── Retry com backoff ───────────────────────────────────────────────────────────
 function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
   let i = 0;
   async function tentativa() {
@@ -80,7 +79,7 @@ function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
   return tentativa();
 }
 
-// ── Produtos e preços ───────────────────────────────────────────────────────────────────────────────
+// ── Produtos e preços ───────────────────────────────────────────────────────────
 const PRECOS_PADRAO = { trufa: 5.0, bolo: 12.0 };
 
 let PRECOS = persist.carregarPrecos(null);
@@ -95,21 +94,18 @@ if (!PRECOS) {
 }
 
 function salvarPrecos() {
-  try { fs.writeFileSync('precos.json', JSON.stringify(PRECOS), 'utf8'); } catch (e) {}
   persist.salvarPrecos(PRECOS);
 }
 
 const SINONIMOS = {
   trufa: [
     'trufa', 'trufas', 'trufinha', 'trufinhas',
-    // bombom = mesmo produto
     'bombom', 'bombons', 'bombon',
-    // erros fonéticos comuns de voz (Whisper)
-    'momon', 'monom', 'momom', 'mombon', 'mombon', 'bombon',
-    'bombon', 'bonbon', 'bonbom', 'bonbons',
+    'momon', 'monom', 'momom', 'mombon',
+    'bonbon', 'bonbom', 'bonbons',
     'pompon', 'pompom',
   ],
-  bolo:  ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote'],
+  bolo: ['bolo', 'bolos', 'bolinho', 'bolinhos', 'bolo de pote', 'bolo pote'],
 };
 
 // Sinônimos extras persistidos
@@ -125,7 +121,6 @@ if (!SINONIMOS_EXTRA) {
 }
 
 function salvarSinonimosExtra() {
-  try { fs.writeFileSync('sinonimos.json', JSON.stringify(SINONIMOS_EXTRA), 'utf8'); } catch (e) {}
   persist.salvarSinonimos(SINONIMOS_EXTRA);
 }
 
@@ -192,7 +187,7 @@ function nomeProdutoExib(produto) {
   return capitalizarNome(produto.replace(/_/g, ' '));
 }
 
-// ── Histórico de lançamentos (para cancelar) ────────────────────────────────────────────
+// ── Histórico de lançamentos (para cancelar) ────────────────────────────────────
 const ULTIMOS_LANCAMENTOS = {};
 const MAX_HIST_CANCEL = 10;
 function pushLancamento(jid, obj) {
@@ -201,7 +196,7 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
-// ── Aliases de nome ──────────────────────────────────────────────────────────────────────────────
+// ── Aliases de nome ─────────────────────────────────────────────────────────────
 let ALIASES = persist.carregarAliases(null);
 if (!ALIASES) {
   try {
@@ -214,7 +209,6 @@ if (!ALIASES) {
 }
 
 function salvarAliases() {
-  try { fs.writeFileSync('aliases.json', JSON.stringify(ALIASES, null, 2), 'utf8'); } catch (e) {}
   persist.salvarAliases(ALIASES);
 }
 
@@ -235,7 +229,7 @@ function definirAlias(apelido, nomeCompleto) {
 }
 
 module.exports = {
-  norm, capitalizarNome, agora, agoraData, soData, horaAtualSP,
+  norm, capitalizarNome, agoraData, soData, horaAtualSP,
   levenshtein, nomesFuzzyIguais, resolverNome, mesmoNome,
   comRetry,
   PRECOS, salvarPrecos, SINONIMOS, SINONIMOS_EXTRA, salvarSinonimosExtra,
