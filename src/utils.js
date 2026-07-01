@@ -18,6 +18,10 @@ function capitalizarNome(n) {
   return n.trim().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 }
 
+function agora() {
+  return new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+}
+
 function agoraData() { return new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function soData(str) { if (!str) return ''; return (str.trim().split(' ')[0] || str.trim()).replace(',', ''); }
 
@@ -229,7 +233,7 @@ function definirAlias(apelido, nomeCompleto) {
 }
 
 module.exports = {
-  norm, capitalizarNome, agoraData, soData, horaAtualSP,
+  norm, capitalizarNome, agora, agoraData, soData, horaAtualSP,
   levenshtein, nomesFuzzyIguais, resolverNome, mesmoNome,
   comRetry,
   PRECOS, salvarPrecos, SINONIMOS, SINONIMOS_EXTRA, salvarSinonimosExtra,
