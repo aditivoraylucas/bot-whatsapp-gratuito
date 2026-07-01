@@ -28,10 +28,10 @@ let pairingPendente       = false;
 let pairingNumero         = '';
 let tentativasReconexao   = 0;
 let sessaoInvalidada      = false;
+let tsConectadoEm         = 0; // timestamp (s) da última conexão bem-sucedida
 
 const mensagensProcessadas = new Set();
-const TTL_MENSAGEM_MS      = 5 * 60 * 1000; // 5 minutos
-const IDADE_MAXIMA_MS      = 60 * 1000;      // mensagens com mais de 60s são histórico
+const TTL_MENSAGEM_MS      = 5 * 60 * 1000;
 
 function getBotConectado()     { return botConectado; }
 function getSockGlobal()       { return sockGlobal; }
@@ -96,9 +96,8 @@ async function limparSessaoNoRender() {
 
 let _hashSalvo        = null;
 let _timerRender      = null;
-const DEBOUNCE_RENDER = 5 * 60 * 1000; // 5 minutos
+const DEBOUNCE_RENDER = 5 * 60 * 1000;
 
-// Salva imediatamente no disco. Agenda envio para a Render API com debounce de 5 min.
 async function salvarSessaoNoRender() {
   if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
   const credsPath = path.join(AUTH_DIR, 'creds.json');
@@ -323,6 +322,7 @@ async function iniciarBot() {
       pairingPendente     = false;
       sessaoInvalidada    = false;
       tentativasReconexao = 0;
+      tsConectadoEm       = Math.floor(Date.now() / 1000);
       console.log('✅ Bot conectado ao WhatsApp!');
       await salvarSessaoNoRenderImediato();
 
@@ -375,11 +375,15 @@ async function iniciarBot() {
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
-        // ── Filtro de idade: descarta mensagens com mais de 60s (histórico do Baileys) ──
+        // ── Filtro de idade ──────────────────────────────────────────────────────
+        // Nos primeiros 3min após conexão aceita mensagens de até 5min atrás
+        // (cobre o tempo de deploy). Depois disso, só mensagens de até 60s.
         const msgTimestamp = msg?.messageTimestamp;
         if (msgTimestamp) {
-          const idadeSec = Math.floor(Date.now() / 1000) - Number(msgTimestamp);
-          if (idadeSec > 60) {
+          const agora       = Math.floor(Date.now() / 1000);
+          const idadeSec    = agora - Number(msgTimestamp);
+          const limiteIdade = (agora - tsConectadoEm) < 180 ? 300 : 60;
+          if (idadeSec > limiteIdade) {
             console.log(`[dedup] mensagem antiga ignorada (${idadeSec}s): ${msg?.key?.id}`);
             continue;
           }
