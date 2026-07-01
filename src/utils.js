@@ -1,9 +1,9 @@
-// ─── UTILITÁRIOS COMPARTILHADOS ────────────────────────────────────────────────
+// ─── UTILITÁRIOS COMPARTILHADOS ────────────────────────────────────────────────────
 const fs   = require('fs');
 const path = require('path');
 const persist = require('./persist');
 
-// ── Normalização de texto ───────────────────────────────────────────────────────
+// ── Normalização de texto ────────────────────────────────────────────────────
 function norm(t) {
   return (t || '')
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
@@ -30,7 +30,7 @@ function horaAtualSP() {
   return parseInt(formatter.format(new Date()));
 }
 
-// ── Levenshtein / fuzzy nome ────────────────────────────────────────────────────
+// ── Levenshtein / fuzzy nome ──────────────────────────────────────────────
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) => [i]);
@@ -62,18 +62,27 @@ function resolverNome(digitado, nomesConhecidos) {
 
 function mesmoNome(a, b) { return norm(a) === norm(b) || nomesFuzzyIguais(a, b); }
 
-// ── Retry com backoff ───────────────────────────────────────────────────────────
+// ── Retry com backoff ──────────────────────────────────────────────────────
 function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
   let i = 0;
   async function tentativa() {
     try {
       return await fn();
     } catch (err) {
-      const isPrematureClose = err?.message?.includes('Premature close') || err?.message?.includes('fetch failed');
-      if (isPrematureClose && i < tentativas - 1) {
+      const msg = (err?.message || '').toLowerCase();
+      const isRetryable =
+        msg.includes('premature close') ||
+        msg.includes('fetch failed') ||
+        msg.includes('econnreset') ||
+        msg.includes('etimedout') ||
+        msg.includes('socket hang up') ||
+        msg.includes('429') ||
+        msg.includes('503') ||
+        msg.includes('rate limit');
+      if (isRetryable && i < tentativas - 1) {
         i++;
         const espera = i * 2000;
-        console.log(`[${labelErro}] Tentativa ${i}/${tentativas} falhou. Aguardando ${espera / 1000}s...`);
+        console.log(`[${labelErro}] Tentativa ${i}/${tentativas} falhou (${msg.slice(0, 60)}). Aguardando ${espera / 1000}s...`);
         await new Promise(r => setTimeout(r, espera));
         return tentativa();
       }
@@ -83,7 +92,7 @@ function comRetry(fn, tentativas = 4, labelErro = 'Google API') {
   return tentativa();
 }
 
-// ── Produtos e preços ───────────────────────────────────────────────────────────
+// ── Produtos e preços ────────────────────────────────────────────────────────────
 const PRECOS_PADRAO = { trufa: 5.0, bolo: 12.0 };
 
 let PRECOS = persist.carregarPrecos(null);
@@ -191,7 +200,7 @@ function nomeProdutoExib(produto) {
   return capitalizarNome(produto.replace(/_/g, ' '));
 }
 
-// ── Histórico de lançamentos (para cancelar) ────────────────────────────────────
+// ── Histórico de lançamentos (para cancelar) ──────────────────────────────────
 const ULTIMOS_LANCAMENTOS = {};
 const MAX_HIST_CANCEL = 10;
 function pushLancamento(jid, obj) {
@@ -200,7 +209,7 @@ function pushLancamento(jid, obj) {
   if (ULTIMOS_LANCAMENTOS[jid].length > MAX_HIST_CANCEL) ULTIMOS_LANCAMENTOS[jid].shift();
 }
 
-// ── Aliases de nome ─────────────────────────────────────────────────────────────
+// ── Aliases de nome ─────────────────────────────────────────────────────────────────
 let ALIASES = persist.carregarAliases(null);
 if (!ALIASES) {
   try {
