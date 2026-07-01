@@ -29,6 +29,13 @@ const {
   criarConfirmacaoProduto, criarConfirmacaoQuantidade,
 } = require('./handlers/session');
 
+// ── Helper: remove artigos/preposições no início do nome ──────────────────────
+function limparNomeInicial(nome) {
+  return String(nome || '')
+    .replace(/^(o|a|os|as|do|da|dos|das|de|um|uma|seu|sua|dona|dom)\s+/i, '')
+    .trim();
+}
+
 // ── Helper: formata a resposta de uma compra registrada ───────────────────────────
 function formatarRespostaCompra(res, produto) {
   const emoji    = emojiProduto(produto);
@@ -80,7 +87,7 @@ function parsearLinha(linha) {
     }
   }
   if (inicioItens < 1) return null;
-  const nomeRaw = palavrasOrig.slice(0, inicioItens).join(' ').trim();
+  const nomeRaw = limparNomeInicial(palavrasOrig.slice(0, inicioItens).join(' ').trim());
   if (!nomeRaw || PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
   const itens = []; let i = inicioItens;
   while (i < n) {
@@ -105,7 +112,7 @@ function parsearCompraSemQuantidade(texto) {
   for (let i = 1; i < n; i++) {
     const p1 = toProduto(palavras[i]);
     if (p1) {
-      const nomeRaw   = palavras.slice(0, i).join(' ');
+      const nomeRaw   = limparNomeInicial(palavras.slice(0, i).join(' '));
       if (PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
       const temNumero = palavras.slice(0, i).some(p => toNumero(p) !== null);
       if (temNumero) return null;
@@ -114,7 +121,7 @@ function parsearCompraSemQuantidade(texto) {
     if (i + 1 < n) {
       const p2 = toProduto(palavras[i] + ' ' + palavras[i+1]);
       if (p2) {
-        const nomeRaw   = palavras.slice(0, i).join(' ');
+        const nomeRaw   = limparNomeInicial(palavras.slice(0, i).join(' '));
         if (PALAVRAS_RESERVADAS.has(norm(nomeRaw))) return null;
         const temNumero = palavras.slice(0, i).some(p => toNumero(p) !== null);
         if (temNumero) return null;
@@ -231,7 +238,7 @@ function parsearPagamento(linha) {
   let kwIdx = -1;
   for (let i = 0; i < palavrasProc.length; i++) { if (palavrasProc[i] === keyword) { kwIdx = i; break; } }
   if (kwIdx <= 0) return null;
-  const nomeRaw = palavrasProc.slice(0, kwIdx).join(' ').trim();
+  const nomeRaw = limparNomeInicial(palavrasProc.slice(0, kwIdx).join(' ').trim());
   if (!nomeRaw) return null;
   const metodo = extrairMetodo(linha);
   const resto = palavrasProc.slice(kwIdx + 1).join(' ').trim();
@@ -263,7 +270,6 @@ async function processarTexto(texto, jid, sock) {
   const palavras = t.split(/\s+/).filter(Boolean);
   const p0 = palavras[0]; const p1 = palavras[1]; const resto = palavras.slice(1).join(' ');
 
-  // ── Fluxo de confirmação pendente ──────────────────────────────────────────────
   const confirmacao = CONFIRMACAO_PENDENTE[jid];
   if (confirmacao) {
     if (Date.now() > confirmacao.expira) {
@@ -291,7 +297,6 @@ async function processarTexto(texto, jid, sock) {
     }
   }
 
-  // ── Confirmação de zerar pendente ─────────────────────────────────────────────
   if (ZERAR_PENDENTE[jid]) {
     const { cliente, expira } = ZERAR_PENDENTE[jid];
     delete ZERAR_PENDENTE[jid];
@@ -300,7 +305,6 @@ async function processarTexto(texto, jid, sock) {
     return `↩️ Operação cancelada. O histórico de *${capitalizarNome(cliente)}* não foi apagado.`;
   }
 
-  // ── renomear ────────────────────────────────────────────────────────────────────
   if (p0 === 'renomear') {
     const textoResto = texto.trim().slice('renomear'.length).trim();
     const sep = textoResto.includes('>') ? '>' : textoResto.includes(' para ') ? ' para ' : null;
@@ -312,7 +316,6 @@ async function processarTexto(texto, jid, sock) {
     return await renomearCliente(nomeAntigo, nomeNovo);
   }
 
-  // ── relatorio ───────────────────────────────────────────────────────────────────
   if (p0 === 'relatorio' || p0 === 'relatorios') {
     if (p1 === 'hoje')                         return await gerarRelatorioPeriodo('hoje');
     if (p1 === 'semana')                       return await gerarRelatorioPeriodo('semana');
@@ -330,7 +333,6 @@ async function processarTexto(texto, jid, sock) {
   if (p0 === 'ajuda' || p0 === 'help') return mensagemAjuda();
   if (p0 === 'produtos')             return listarProdutos();
 
-  // ── Zerar com confirmação ──────────────────────────────────────────────────────
   if (p0 === 'zerar' && p1) {
     const nomeCliente = palavras.slice(1).join(' ');
     ZERAR_PENDENTE[jid] = { cliente: nomeCliente, expira: Date.now() + ZERAR_TTL_MS };
@@ -338,7 +340,6 @@ async function processarTexto(texto, jid, sock) {
     return `⚠️ *Tem certeza que quer zerar o histórico de "${capitalizarNome(nomeCliente)}"?*\nEsta ação não pode ser desfeita.\n\nResponda *sim* para confirmar ou qualquer outra mensagem para cancelar.`;
   }
 
-  // ── Aliases ──────────────────────────────────────────────────────────────────────
   if (p0 === 'aliases') {
     const entradas = Object.entries(ALIASES);
     if (!entradas.length) return '📋 Nenhum apelido cadastrado ainda.\n_Use: alias [apelido] [nome completo]_';
@@ -374,7 +375,6 @@ async function processarTexto(texto, jid, sock) {
     if (preco && preco > 0) { const nomeProd = partes.slice(0, -1).join(' ').trim(); if (nomeProd) return cadastrarNovoProduto(nomeProd, preco); }
   }
 
-  // ── Expandir alias ─────────────────────────────────────────────────────────────
   let textoResolvido = texto;
   {
     const primeiraOriginal = texto.trim().split(/\s+/)[0];
@@ -384,7 +384,6 @@ async function processarTexto(texto, jid, sock) {
     }
   }
 
-  // ── Venda à vista ──────────────────────────────────────────────────────────────
   const vista = parsearVendaVista(textoResolvido);
   if (vista) {
     const msgs = [];
@@ -405,7 +404,6 @@ async function processarTexto(texto, jid, sock) {
     if (pag.tipo === 'valor')   { const r = await processarPagamentoValor(pag.nome, pag.valor, jid, pag.metodo); return r.msg; }
   }
 
-  // ── Compra fiado (parser principal) ───────────────────────────────────────────
   const compra = parsearLinha(textoResolvido);
   if (compra) {
     const msgs = [];
@@ -422,21 +420,19 @@ async function processarTexto(texto, jid, sock) {
     return msgs.join('\n');
   }
 
-  // ── Fallback: produto sem quantidade ──────────────────────────────────────────
   const semQtd = parsearCompraSemQuantidade(textoResolvido);
   if (semQtd) {
     criarConfirmacaoQuantidade(jid, semQtd.nome, semQtd.produto);
     return `Quantos *${nomeProdutoExib(semQtd.produto).toLowerCase()}s* *${semQtd.nome}* levou?\n\n1️⃣  1\n2️⃣  2\n3️⃣  3\n4️⃣  4\n5️⃣  5\n🔢  Outro — digite o número`;
   }
 
-  // ── Fallback: nome + produto não reconhecido → pergunta produto ────────────────
   const palavrasResolvidas = textoResolvido.trim().split(/\s+/).filter(Boolean);
   if (palavrasResolvidas.length >= 2 && !PALAVRAS_RESERVADAS.has(p0)) {
     const primeiraParece = /^[A-ZÀ-Ú]/.test(palavrasResolvidas[0]) || palavrasResolvidas[0].length >= 3;
     if (primeiraParece) {
       const algumProduto = palavrasResolvidas.some(p => toProduto(norm(p)));
       if (!algumProduto) {
-        const nomeGuess = capitalizarNome(palavrasResolvidas[0]);
+        const nomeGuess = capitalizarNome(limparNomeInicial(palavrasResolvidas[0]));
         criarConfirmacaoProduto(jid, nomeGuess, textoResolvido.trim());
         return `❓ Não reconheci o produto. O que *${nomeGuess}* comprou?\n\n${menuProdutos()}\n\nResponda com o número ou o nome do produto.`;
       }
