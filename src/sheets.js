@@ -94,7 +94,7 @@ async function cancelarLancamento(jid, nomeDigitado) {
     const rowsHist  = histId ? await getRows('Historico', HDR_HIST) : [];
 
     if (lanc.tipo === 'compra') {
-      const row = rowsSaldo.find(r => r.Cliente === lanc.cliente && norm(r.Produto) === norm(lanc.produto));
+      const row = rowsSaldo.find(r => mesmoNome(r.Cliente, lanc.cliente) && norm(r.Produto) === norm(lanc.produto));
       if (row) {
         const novaQtd   = parseInt(row.Quantidade || '0') - lanc.quantidade;
         const novoTotal = parseFloat(row.Total || '0') - lanc.valor;
@@ -102,7 +102,7 @@ async function cancelarLancamento(jid, nomeDigitado) {
         else await updateRow('Saldo', HDR_SALDO, row._rowIndex, { ...row, Quantidade: novaQtd, Total: novoTotal.toFixed(2) });
       }
       for (let i = rowsHist.length - 1; i >= 0; i--) {
-        if (rowsHist[i].Cliente === lanc.cliente && norm(rowsHist[i].Produto) === norm(lanc.produto) && rowsHist[i].Tipo === 'Compra') {
+        if (mesmoNome(rowsHist[i].Cliente, lanc.cliente) && norm(rowsHist[i].Produto) === norm(lanc.produto) && rowsHist[i].Tipo === 'Compra') {
           await deleteRows(histId, [rowsHist[i]._rowIndex]); break;
         }
       }
@@ -127,7 +127,7 @@ async function cancelarLancamento(jid, nomeDigitado) {
         await appendRow('Saldo', HDR_SALDO, { Cliente: lanc.cliente, Produto: produto, Quantidade: qtd, Total: lanc.valor.toFixed(2), UltimaCompra: agora() });
       }
       for (let i = rowsHist.length - 1; i >= 0; i--) {
-        if (rowsHist[i].Cliente === lanc.cliente && rowsHist[i].Tipo === 'Pagamento') {
+        if (mesmoNome(rowsHist[i].Cliente, lanc.cliente) && rowsHist[i].Tipo === 'Pagamento') {
           await deleteRows(histId, [rowsHist[i]._rowIndex]); break;
         }
       }
